@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 仮想環境
+.venv/
+venv/
+env/
+
+# VS Code
+.vscode/
+
+# Streamlit秘密情報
+.streamlit/secrets.toml
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# 一時ファイル
+*.tmp
+*.log
