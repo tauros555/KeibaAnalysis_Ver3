@@ -14,17 +14,12 @@ import config
 from modules import loader
 from modules.analyzer import SireAnalyzer
 
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-MODULES_DIR = BASE_DIR / "modules"
-
-
 
 # =====================================================
 # パス設定
 # =====================================================
 
-TRAINING_CSV_PATH = DATA_DIR / "調教判定表.csv"
+TRAINING_CSV_PATH = Path("data") / "調教判定表.csv"
 
 
 # =====================================================
@@ -292,17 +287,27 @@ def load_training_csv(path):
     return normalize_training_df(df)
 
 
-def get_training_record(training_df, horse_name, course_id=None):
+def get_training_record(
+    training_df,
+    horse_name,
+    course_id=None,
+    race_no=None,
+):
     """
-    調教判定表から1頭分のデータを取得
-    基本は 馬名 で照合
-    コースIDがある場合は 馬名 + コースID を優先
+    調教判定表から1頭分のデータを取得する。
+
+    自動取得モードでは、同一競馬場・同一距離の別レースが
+    混ざらないよう、次の順で照合する。
+
+    1. 馬名
+    2. コースID
+    3. レース番号
+
+    手入力モードではrace_noがNoneになるため、
+    馬名とコースIDで照合する。
     """
 
-    if training_df is None:
-        return None
-
-    if len(training_df) == 0:
+    if training_df is None or len(training_df) == 0:
         return None
 
     if "馬名_key" not in training_df.columns:
@@ -313,16 +318,63 @@ def get_training_record(training_df, horse_name, course_id=None):
     target_horse = normalize_text(horse_name)
     target_course_id = normalize_text(course_id)
 
-    hit_df = df[df["馬名_key"] == target_horse]
+    # -----------------------------
+    # 馬名一致
+    # -----------------------------
+
+    hit_df = df[
+        df["馬名_key"] == target_horse
+    ].copy()
 
     if len(hit_df) == 0:
         return None
 
-    if target_course_id != "" and "コースID_key" in hit_df.columns:
-        hit_course_df = hit_df[hit_df["コースID_key"] == target_course_id]
+    # -----------------------------
+    # コースID一致
+    # -----------------------------
 
-        if len(hit_course_df) > 0:
-            return hit_course_df.iloc[0].to_dict()
+    if (
+        target_course_id != ""
+        and "コースID_key" in hit_df.columns
+    ):
+        course_hit_df = hit_df[
+            hit_df["コースID_key"] == target_course_id
+        ].copy()
+
+        if len(course_hit_df) == 0:
+            return None
+
+        hit_df = course_hit_df
+
+    # -----------------------------
+    # レース番号一致
+    # -----------------------------
+
+    if race_no is not None:
+        if "R" not in hit_df.columns:
+            return None
+
+        hit_df["R"] = pd.to_numeric(
+            hit_df["R"],
+            errors="coerce",
+        )
+
+        try:
+            target_race_no = int(race_no)
+        except (TypeError, ValueError):
+            return None
+
+        race_hit_df = hit_df[
+            hit_df["R"] == target_race_no
+        ].copy()
+
+        if len(race_hit_df) == 0:
+            return None
+
+        hit_df = race_hit_df
+
+    if len(hit_df) == 0:
+        return None
 
     return hit_df.iloc[0].to_dict()
 
@@ -1359,7 +1411,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🏇 競馬分析アプリ Ver3.3")
+st.title("🏇 競馬分析アプリ Ver3.7")
 
 
 # =====================================================
@@ -1663,6 +1715,35 @@ if surface == "芝":
 
 
 # =====================================================
+# 分析条件変更時の前回結果クリア
+# =====================================================
+
+current_analysis_key = (
+    str(input_mode),
+    str(place),
+    int(race_no) if race_no is not None else None,
+    str(surface),
+    int(distance),
+    str(sex),
+    str(cushion),
+    str(going),
+)
+
+previous_analysis_key = st.session_state.get(
+    "analysis_condition_key"
+)
+
+if (
+    previous_analysis_key is not None
+    and previous_analysis_key != current_analysis_key
+):
+    st.session_state.pop("results", None)
+    st.session_state.pop("results_context", None)
+
+st.session_state["analysis_condition_key"] = current_analysis_key
+
+
+# =====================================================
 # トップページ：相手候補以上レース一覧
 # =====================================================
 
@@ -1864,6 +1945,16 @@ if run:
     progress.empty()
 
     st.session_state["results"] = results
+    st.session_state["results_context"] = {
+        "input_mode": input_mode,
+        "place": place,
+        "race_no": race_no,
+        "surface": surface,
+        "distance": int(distance),
+        "sex": sex,
+        "cushion": cushion,
+        "going": going,
+    }
 
     st.success("分析が完了しました。")
 
@@ -1877,6 +1968,14 @@ if "results" in st.session_state:
     st.subheader("分析結果")
 
     results = st.session_state["results"]
+    results_context = st.session_state.get(
+        "results_context",
+        {},
+    )
+    result_race_no = results_context.get(
+        "race_no",
+        race_no,
+    )
 
     results = [
         r for r in results
@@ -1988,6 +2087,7 @@ if "results" in st.session_state:
             training_df=training_df,
             horse_name=r["horse_name"],
             course_id=course_id,
+            race_no=result_race_no,
         )
 
         training_records.append(record)
