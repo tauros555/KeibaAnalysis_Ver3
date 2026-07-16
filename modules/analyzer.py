@@ -1,1584 +1,278 @@
-"""
-=========================================
-Sire Analyzer Ver2.5
-analyzer.py
------------------------------------------
-分析エンジン
+"""Sire Analyzer Ver5.
 
-改訂内容
------------------------------------------
-・父馬適性分析に性別要素を反映
-・左右 / 坂 / 距離区分 / 枠 / 馬番は
-  競馬場×距離に寄せすぎず、父馬×性別×該当条件で評価
-・根幹 / 非根幹の好転条件を追加
-・好転条件は点数化しない
-・好転条件は「根」「非根」「-」で返す
-=========================================
+Continuous statistics, partial pooling by sex, hierarchical course-distance
+analysis, and corner-count aptitude. Public output keys remain compatible with
+Ver3 app.py.
 """
+from __future__ import annotations
 
+from typing import Any, Callable
 import pandas as pd
 
 import config
-
-from modules import filter
-from modules import statistics
-from modules import evaluation
-from modules import bias
+from modules import statistics, evaluation, bias
+from modules import filter as race_filter
 
 
 class SireAnalyzer:
-    """
-    種牡馬分析クラス
-    """
+    def __init__(self, race_df: pd.DataFrame, course_df: pd.DataFrame, lucky_df: pd.DataFrame):
+        self.race_df = race_df.copy() if race_df is not None else pd.DataFrame()
+        self.course_df = course_df.copy() if course_df is not None else pd.DataFrame()
+        self.lucky_df = lucky_df.copy() if lucky_df is not None else pd.DataFrame()
+        self.race_df.columns = [str(c).strip() for c in self.race_df.columns]
+        self.course_df.columns = [str(c).strip() for c in self.course_df.columns]
 
-    def __init__(
-        self,
-        race_df: pd.DataFrame,
-        course_df: pd.DataFrame,
-        lucky_df: pd.DataFrame
-    ):
-        self.race_df = race_df
-        self.course_df = course_df
-        self.lucky_df = lucky_df
+    @staticmethod
+    def _empty_result(scope="データ不足"):
+        stats = {
+            "sample": 0, "base_sample": 0, "win": 0, "place": 0,
+            "win_rate": 0.0, "place_rate": 0.0, "base_win_rate": 0.0,
+            "base_place_rate": 0.0, "win_rate_diff": 0.0, "place_rate_diff": 0.0,
+            "rr": 1.0, "place_rr": 1.0, "p_value": 1.0,
+            "confidence_score": 0.0, "stat_score": 0.0, "aptitude_index": 100,
+            "selected_scope": scope,
+        }
+        return {"stats": stats, "grade": "-", "grade_text": "データ不足", "stat_score": 0.0}
 
-    # ==========================================
-    # 安全系ユーティリティ
-    # ==========================================
-
-    def _safe_int(
-        self,
-        value,
-        default=None
-    ):
-        """
-        int変換を安全に行う
-        """
-
-        try:
-
-            if value is None:
-                return default
-
-            if pd.isna(value):
-                return default
-
-            return int(value)
-
-        except:
-
-            return default
-
-    def _safe_float(
-        self,
-        value,
-        default=0.0
-    ):
-        """
-        float変換を安全に行う
-        """
-
-        try:
-
-            if value is None:
-                return default
-
-            if pd.isna(value):
-                return default
-
-            return float(value)
-
-        except:
-
-            return default
-
-    def _clean_columns(
-        self,
-        df
-    ):
-        """
-        列名の前後空白を除去
-        """
-
-        if df is None:
-            return df
-
-        df = df.copy()
-
-        df.columns = [
-            str(col).strip()
-            for col in df.columns
-        ]
-
-        return df
-
-    def _get_finish_column(
-        self,
-        df
-    ):
-        """
-        着順列を取得
-        """
-
-        if df is None:
+    def get_course_info(self, course_id):
+        if course_id in [None, "", "未指定"] or self.course_df.empty or config.COL_COURSE_ID not in self.course_df.columns:
             return None
+        values = self.course_df[config.COL_COURSE_ID].astype(str).str.strip()
+        hit = self.course_df[values == str(course_id).strip()]
+        return None if hit.empty else hit.iloc[0].to_dict()
 
-        candidates = []
+    def _sire_all(self, sire_name):
+        if self.race_df.empty or config.COL_SIRE not in self.race_df.columns:
+            return pd.DataFrame(columns=self.race_df.columns)
+        return self.race_df[self.race_df[config.COL_SIRE].astype(str).str.strip() == str(sire_name).strip()].copy()
 
-        if hasattr(config, "COL_FINISH"):
-            candidates.append(config.COL_FINISH)
+    def _analyze_selector(self, sire_name: str, selector: Callable[[pd.DataFrame], pd.DataFrame], sex=None, scope=""):
+        sire_all = self._sire_all(sire_name)
+        if sire_all.empty:
+            return self._empty_result(scope)
+        stats_dict = statistics.analyze_condition(sire_all, selector, sex=sex)
+        stats_dict["selected_scope"] = scope
+        grade = evaluation.judge(stats_dict)
+        return {
+            "stats": stats_dict,
+            "grade": grade,
+            "grade_text": evaluation.judge_text(grade),
+            "stat_score": float(stats_dict.get("stat_score", 0.0)),
+        }
 
-        candidates.extend(
-            [
-                "確定着順",
-                "着順",
-                "入線順位",
-                "着",
-            ]
-        )
+    def _course_distance_result(self, sire_name, place, distance, course_id, sex, course_info):
+        sire_all = self._sire_all(sire_name)
+        if sire_all.empty:
+            return self._empty_result("データ不足")
+        d = int(distance) if distance is not None else None
+        surface = None
+        if course_info:
+            surface = course_info.get("芝・ダ")
+        if surface is None and course_id:
+            surface = "芝" if "芝" in str(course_id) else "ダ"
 
-        for col in candidates:
+        def surface_mask(df):
+            if surface is None:
+                return pd.Series(True, index=df.index)
+            # Prefer a dedicated surface column; otherwise course ID contains it.
+            if "芝・ダ" in df.columns:
+                return df["芝・ダ"].astype(str).str.strip().isin([surface, "ダート" if surface == "ダ" else surface])
+            return df[config.COL_COURSE_ID].astype(str).str.contains(surface, na=False)
 
-            if col in df.columns:
-                return col
+        exact = sire_all[
+            (sire_all[config.COL_PLACE].astype(str).str.strip() == str(place).strip())
+            & (pd.to_numeric(sire_all[config.COL_DISTANCE], errors="coerce") == d)
+            & surface_mask(sire_all)
+        ]
+        exact_n = len(exact)
+        nearby = sire_all[
+            (sire_all[config.COL_PLACE].astype(str).str.strip() == str(place).strip())
+            & (pd.to_numeric(sire_all[config.COL_DISTANCE], errors="coerce").between(d - config.COURSE_DISTANCE_MARGIN, d + config.COURSE_DISTANCE_MARGIN))
+            & surface_mask(sire_all)
+        ] if d is not None else exact
+        nearby_n = len(nearby)
+        distance_type = course_info.get(config.COL_DISTANCE_TYPE) if course_info else None
+        dist_type_df = sire_all
+        if distance_type and config.COL_DISTANCE_TYPE in sire_all.columns:
+            dist_type_df = sire_all[(sire_all[config.COL_DISTANCE_TYPE] == distance_type) & surface_mask(sire_all)]
+        dist_n = len(dist_type_df)
 
+        if exact_n >= config.COURSE_EXACT_SAMPLE:
+            selected = exact
+            level = "exact"
+            scope = f"{place}{surface or ''}{d}"
+        elif nearby_n >= config.COURSE_NEARBY_SAMPLE:
+            selected = nearby
+            level = "nearby"
+            scope = f"{place}{surface or ''}{d-config.COURSE_DISTANCE_MARGIN}～{d+config.COURSE_DISTANCE_MARGIN}"
+        elif dist_n >= config.STAT_MIN_SAMPLE:
+            selected = dist_type_df
+            level = "distance_type"
+            scope = f"全場{surface or ''}{distance_type or '距離区分'}"
+        else:
+            return self._empty_result("階層すべてサンプル不足")
+
+        overall_stats = statistics.calc_effect_statistics(selected, sire_all)
+        if sex not in [None, "", "すべて"] and config.COL_SEX in sire_all.columns:
+            sex_all = sire_all[sire_all[config.COL_SEX].astype(str).str.strip() == str(sex).strip()]
+            if level == "exact":
+                sex_selected = sex_all[(sex_all[config.COL_PLACE].astype(str).str.strip() == str(place).strip()) & (pd.to_numeric(sex_all[config.COL_DISTANCE], errors="coerce") == d)]
+            elif level == "nearby":
+                sex_selected = sex_all[(sex_all[config.COL_PLACE].astype(str).str.strip() == str(place).strip()) & (pd.to_numeric(sex_all[config.COL_DISTANCE], errors="coerce").between(d-config.COURSE_DISTANCE_MARGIN, d+config.COURSE_DISTANCE_MARGIN))]
+            else:
+                sex_selected = sex_all[sex_all[config.COL_DISTANCE_TYPE] == distance_type] if distance_type and config.COL_DISTANCE_TYPE in sex_all.columns else sex_all
+            sex_stats = statistics.calc_effect_statistics(sex_selected, sex_all)
+            pooled = statistics.partial_pool_effect(overall_stats, sex_stats)
+        else:
+            pooled = overall_stats
+            pooled.update({"sex_sample": 0, "sex_weight": 0.0, "pooling": "父馬全体"})
+        pooled.update({
+            "source_level": level, "selected_scope": scope,
+            "exact_sample": exact_n, "nearby_sample": nearby_n,
+            "distance_type_sample": dist_n,
+        })
+        grade = evaluation.judge(pooled)
+        return {"stats": pooled, "grade": grade, "grade_text": evaluation.judge_text(grade), "stat_score": pooled.get("stat_score", 0.0)}
+
+    def analyze_right_left(self, sire_name, right_left, sex=None):
+        if right_left in [None, ""]: return None
+        return self._analyze_selector(sire_name, lambda d: d[d[config.COL_RIGHT_LEFT] == right_left] if config.COL_RIGHT_LEFT in d.columns else d.iloc[0:0], sex, f"{right_left}回り")
+
+    def analyze_slope(self, sire_name, slope, sex=None):
+        if slope in [None, ""]: return None
+        return self._analyze_selector(sire_name, lambda d: d[d[config.COL_SLOPE] == slope] if config.COL_SLOPE in d.columns else d.iloc[0:0], sex, f"坂:{slope}")
+
+    def analyze_corner_count(self, sire_name, corner_count, sex=None):
+        if corner_count in [None, ""]: return None
+        c = float(corner_count)
+        col = config.COL_CORNER_COUNT
+        result = self._analyze_selector(sire_name, lambda d: d[pd.to_numeric(d[col], errors="coerce") == c] if col in d.columns else d.iloc[0:0], sex, f"コーナー{c:g}回")
+        if result["grade"] == "-":
+            group = "少" if c <= 2 else "多"
+            result = self._analyze_selector(
+                sire_name,
+                lambda d: d[pd.to_numeric(d[col], errors="coerce").le(2) if group == "少" else pd.to_numeric(d[col], errors="coerce").gt(2)] if col in d.columns else d.iloc[0:0],
+                sex,
+                f"{group}コーナー",
+            )
+        return result
+
+    def analyze_distance_type(self, sire_name, distance_type, sex=None):
+        if distance_type in [None, ""]: return None
+        return self._analyze_selector(sire_name, lambda d: d[d[config.COL_DISTANCE_TYPE] == distance_type] if config.COL_DISTANCE_TYPE in d.columns else d.iloc[0:0], sex, f"距離区分:{distance_type}")
+
+    def analyze_frame(self, sire_name, frame=None, sex=None):
+        if frame is None: return None
+        return self._analyze_selector(sire_name, lambda d: d[pd.to_numeric(d[config.COL_FRAME], errors="coerce") == int(frame)] if config.COL_FRAME in d.columns else d.iloc[0:0], sex, f"枠{frame}")
+
+    def analyze_horse_no(self, sire_name, horse_no=None, sex=None):
+        if horse_no is None: return None
+        return self._analyze_selector(sire_name, lambda d: d[pd.to_numeric(d[config.COL_HORSE_NO], errors="coerce") == int(horse_no)] if config.COL_HORSE_NO in d.columns else d.iloc[0:0], sex, f"馬番{horse_no}")
+
+    def analyze_cushion(self, sire_name, cushion, sex=None):
+        if cushion in [None, "", "未指定"]: return None
+        return self._analyze_selector(sire_name, lambda d: race_filter.filter_cushion(d, cushion), sex, f"クッション:{cushion}")
+
+    def analyze_going(self, sire_name, going, sex=None):
+        if going in [None, "", "未指定", "未判明"]: return None
+        return self._analyze_selector(sire_name, lambda d: race_filter.filter_going(d, going), sex, f"馬場:{going}")
+
+    def analyze_core_distance(self, sire_name, sex=None):
+        sire_all = self._sire_all(sire_name)
+        if sire_all.empty or config.COL_DISTANCE not in sire_all.columns:
+            return {"label": "-", "reason": "データ不足", "core": {}, "non_core": {}}
+        if sex not in [None, "", "すべて"] and config.COL_SEX in sire_all.columns:
+            sire_all = sire_all[sire_all[config.COL_SEX].astype(str).str.strip() == str(sex).strip()]
+        dist = pd.to_numeric(sire_all[config.COL_DISTANCE], errors="coerce")
+        core = statistics._rate_summary(sire_all[dist.mod(400).eq(0)])
+        non = statistics._rate_summary(sire_all[~dist.mod(400).eq(0)])
+        if min(core["sample"], non["sample"]) < config.STAT_MIN_SAMPLE:
+            return {"label": "-", "reason": "サンプル不足", "core": core, "non_core": non}
+        wd = core["win_rate"] - non["win_rate"]
+        pdiff = core["place_rate"] - non["place_rate"]
+        label = "根" if (wd >= 2 and pdiff >= 3) else "非根" if (wd <= -2 and pdiff <= -3) else "-"
+        return {"label": label, "reason": "根幹優勢" if label == "根" else "非根幹優勢" if label == "非根" else "差が小さい", "core": core, "non_core": non}
+
+    def get_lucky_number_rank(self, place, distance, horse_no):
+        if horse_no is None or self.lucky_df.empty: return None
+        df = self.lucky_df.copy()
+        # Prefer course ID implementation when available.
+        if "競馬場" in df.columns and "距離" in df.columns and "馬番" in df.columns:
+            hit = df[(df["競馬場"].astype(str).str.strip() == str(place).strip()) & (pd.to_numeric(df["距離"], errors="coerce") == int(distance)) & (pd.to_numeric(df["馬番"], errors="coerce") == int(horse_no))]
+            return "★" if not hit.empty else None
         return None
 
-    def _calc_simple_rate(
-        self,
-        df
-    ):
-        """
-        勝率・複勝率を簡易計算する
-        """
+    @staticmethod
+    def _group_score(father_result, key):
+        item = father_result.get(key)
+        return 0.0 if not isinstance(item, dict) else float(item.get("stat_score", item.get("stats", {}).get("stat_score", 0.0)) or 0.0)
 
-        empty_result = {
-            "sample": 0,
-            "win": 0,
-            "place": 0,
-            "win_rate": 0.0,
-            "place_rate": 0.0,
-        }
+    def analyze_all(self, horse_name, sire_name, sex, frame=None, horse_no=None, course_id=None, place=None, distance=None, cushion=None, going=None):
+        course_info = self.get_course_info(course_id)
+        cd = self._course_distance_result(sire_name, place, distance, course_id, sex, course_info)
+        father = {"course_distance": cd}
+        father["right_left"] = self.analyze_right_left(sire_name, course_info.get(config.COL_RIGHT_LEFT) if course_info else None, sex)
+        father["slope"] = self.analyze_slope(sire_name, course_info.get(config.COL_SLOPE) if course_info else None, sex)
+        father["corner_count"] = self.analyze_corner_count(sire_name, course_info.get(config.COL_CORNER_COUNT) if course_info else None, sex)
+        father["distance_type"] = self.analyze_distance_type(sire_name, course_info.get(config.COL_DISTANCE_TYPE) if course_info else None, sex)
+        father["frame"] = self.analyze_frame(sire_name, frame, sex)
+        father["horse_no"] = self.analyze_horse_no(sire_name, horse_no, sex)
+        father["cushion"] = self.analyze_cushion(sire_name, cushion, sex)
+        father["going"] = self.analyze_going(sire_name, going, sex)
+        father["core_distance"] = self.analyze_core_distance(sire_name, sex)
 
-        if df is None:
-            return empty_result
+        # Course shape supplement grows as exact-course confidence falls.
+        cd_conf = float(cd.get("stats", {}).get("confidence_score", 0.0) or 0.0)
+        shape_parts = [self._group_score(father, k) for k in ["right_left", "slope", "corner_count", "distance_type"]]
+        shape_score = sum(shape_parts) / max(sum(1 for x in shape_parts if x != 0), 1)
+        course_group_score = self._group_score(father, "course_distance") * cd_conf + shape_score * (1.0 - cd_conf)
+        market_score = self._group_score(father, "cushion") if cushion not in [None, "", "未指定"] else self._group_score(father, "going")
+        frame_score = self._group_score(father, "frame") + 0.25 * self._group_score(father, "horse_no")
 
-        if len(df) == 0:
-            return empty_result
+        # Bias remains course-side information.
+        base_course_df = self.race_df
+        if course_id and config.COL_COURSE_ID in base_course_df.columns:
+            base_course_df = base_course_df[base_course_df[config.COL_COURSE_ID].astype(str).str.strip() == str(course_id).strip()]
+        frame_bias = bias.analyze_frame_bias(base_course_df, frame) if frame is not None else None
+        if frame_bias is not None:
+            frame_bias["grade"] = evaluation.judge_bias(frame_bias.get("rank"), frame_bias.get("total"), frame_bias.get("sample"), frame_bias.get("diff"))
+        lucky = self.get_lucky_number_rank(place, distance, horse_no)
+        bias_score = 0.0
+        if frame_bias:
+            bias_score += float(frame_bias.get("diff", 0.0) or 0.0) * 0.15
+        if lucky == "★": bias_score += 0.5
+        bias_result = {"frame": frame_bias, "lucky": lucky, "stat_score": round(bias_score, 4)}
 
-        df = self._clean_columns(df)
-
-        finish_col = self._get_finish_column(df)
-
-        if finish_col is None:
-            empty_result["sample"] = len(df)
-            return empty_result
-
-        finish = pd.to_numeric(
-            df[finish_col],
-            errors="coerce"
-        )
-
-        sample = len(df)
-
-        win = int(
-            (finish == 1).sum()
-        )
-
-        place = int(
-            (finish <= 3).sum()
-        )
-
-        if sample <= 0:
-
-            return empty_result
-
+        total = round(course_group_score + market_score + frame_score + bias_score, 3)
+        effect = cd.get("stats", {})
+        overall_grade = evaluation.judge({
+            "sample": effect.get("sample", 0),
+            "stat_score": total,
+            "confidence_score": max(cd_conf, 0.45 if total != 0 else 0.0),
+            "win_rate_diff": effect.get("win_rate_diff", 0.0),
+            "place_rate_diff": effect.get("place_rate_diff", 0.0),
+        })
         return {
-            "sample": sample,
-            "win": win,
-            "place": place,
-            "win_rate": win / sample * 100,
-            "place_rate": place / sample * 100,
-        }
-
-    def _is_core_distance(
-        self,
-        distance
-    ):
-        """
-        根幹距離判定
-
-        400mで割り切れる距離を根幹距離とする
-        例:
-        1200, 1600, 2000, 2400, 2800, 3200
-        """
-
-        distance = self._safe_int(
-            distance,
-            default=None
-        )
-
-        if distance is None:
-            return None
-
-        return distance % 400 == 0
-
-    # ==========================================
-    # 基本条件抽出
-    # ==========================================
-
-    def filter_base(
-        self,
-        place=None,
-        distance=None,
-        sex=None
-    ):
-        """
-        基本条件で抽出
-        """
-
-        return filter.filter_race(
-            self.race_df,
-            place=place,
-            distance=distance,
-            sex=sex
-        )
-
-    # ==========================================
-    # 父馬抽出
-    # ==========================================
-
-    def filter_sire(
-        self,
-        df,
-        sire_name
-    ):
-        """
-        父馬名で抽出
-        """
-
-        if df is None:
-            return pd.DataFrame()
-
-        if len(df) == 0:
-            return pd.DataFrame()
-
-        if config.COL_SIRE not in df.columns:
-            return pd.DataFrame()
-
-        return df[
-            df[config.COL_SIRE] == sire_name
-        ]
-
-    # ==========================================
-    # 基本統計計算
-    # ==========================================
-
-    def calculate_statistics(
-        self,
-        base_df,
-        sire_df
-    ):
-        """
-        基本統計計算
-        """
-
-        return statistics.calc_statistics(
-            sire_df,
-            base_df
-        )
-
-    # ==========================================
-    # 評価取得
-    # ==========================================
-
-    def get_grade(
-        self,
-        stats_dict
-    ):
-        """
-        評価記号取得
-        """
-
-        return evaluation.judge(
-            stats_dict
-        )
-
-    # ==========================================
-    # 評価コメント取得
-    # ==========================================
-
-    def get_grade_text(
-        self,
-        grade
-    ):
-        """
-        評価コメント取得
-        """
-
-        return evaluation.judge_text(
-            grade
-        )
-
-    # ==========================================
-    # 分析結果生成
-    # ==========================================
-
-    def analyze(
-        self,
-        sire_name,
-        place=None,
-        distance=None,
-        sex=None
-    ):
-        """
-        基本分析
-        """
-
-        base_df = self.filter_base(
-            place=place,
-            distance=distance,
-            sex=sex
-        )
-
-        sire_df = self.filter_sire(
-            base_df,
-            sire_name
-        )
-
-        stats_dict = self.calculate_statistics(
-            base_df,
-            sire_df
-        )
-
-        grade = self.get_grade(
-            stats_dict
-        )
-
-        return {
-            "stats": stats_dict,
-            "grade": grade,
-            "grade_text": self.get_grade_text(
-                grade
-            ),
-        }
-
-    # ==========================================
-    # コース情報取得
-    # ==========================================
-
-    def get_course_info(
-        self,
-        course_id
-    ):
-        """
-        コースIDからコース情報を取得
-
-        例:
-        東京芝1600
-        中山ダ1200
-        """
-
-        if course_id in [None, "", "未指定"]:
-            return None
-
-        course_df = self.course_df
-
-        if course_df is None:
-            return None
-
-        if len(course_df) == 0:
-            return None
-
-        course_df = self._clean_columns(
-            course_df
-        )
-
-        if "コースID" not in course_df.columns:
-            return None
-
-        course_df["コースID"] = (
-            course_df["コースID"]
-            .astype(str)
-            .str.strip()
-        )
-
-        target_course_id = str(
-            course_id
-        ).strip()
-
-        hit_df = course_df[
-            course_df["コースID"] == target_course_id
-        ]
-
-        if len(hit_df) == 0:
-            return None
-
-        return hit_df.iloc[0].to_dict()
-
-    # ==========================================
-    # コース条件分析
-    # ==========================================
-
-    def analyze_course(
-        self,
-        sire_name,
-        course_id,
-        place=None,
-        distance=None,
-        sex=None
-    ):
-        """
-        コース条件を加味した分析
-        """
-
-        base_df = self.filter_base(
-            place=place,
-            distance=distance,
-            sex=sex
-        )
-
-        if course_id is not None:
-
-            base_df = statistics.filter_by_course(
-                base_df,
-                course_id
-            )
-
-        sire_df = self.filter_sire(
-            base_df,
-            sire_name
-        )
-
-        course_info = self.get_course_info(
-            course_id
-        )
-
-        if course_info is None:
-            return None
-
-        stats_dict = self.calculate_statistics(
-            base_df,
-            sire_df
-        )
-
-        grade = self.get_grade(
-            stats_dict
-        )
-
-        return {
-            "course": course_info,
-            "stats": stats_dict,
-            "grade": grade,
-            "grade_text": self.get_grade_text(
-                grade
-            ),
-        }
-
-    # ==========================================
-    # ラッキー馬番判定
-    # ==========================================
-
-    def get_lucky_number_rank(
-        self,
-        place,
-        distance,
-        horse_no
-    ):
-        """
-        ラッキー馬番判定
-        """
-
-        if horse_no is None:
-            return None
-
-        if self.lucky_df is None:
-            return None
-
-        if len(self.lucky_df) == 0:
-            return None
-
-        df = self.lucky_df.copy()
-
-        if "競馬場" not in df.columns:
-            return None
-
-        if "距離" not in df.columns:
-            return None
-
-        if "馬番" not in df.columns:
-            return None
-
-        df = df[
-            (df["競馬場"] == place)
-            &
-            (df["距離"] == distance)
-        ]
-
-        if df.empty:
-            return None
-
-        row = df[
-            df["馬番"] == horse_no
-        ]
-
-        if row.empty:
-            return None
-
-        return "★"
-
-    # ==========================================
-    # 右左分析
-    # ==========================================
-
-    def analyze_right_left(
-        self,
-        sire_name,
-        right_left,
-        sex=None
-    ):
-        """
-        父馬×性別×右左で分析
-
-        競馬場×距離とは独立して、
-        その産駒が右回り・左回りのどちらで走りやすいかを見る
-        """
-
-        if right_left in [None, "", "未指定"]:
-            return None
-
-        base_df = self.filter_base(
-            place=None,
-            distance=None,
-            sex=sex
-        )
-
-        base_df = statistics.filter_by_right_left(
-            base_df,
-            right_left
-        )
-
-        sire_df = self.filter_sire(
-            base_df,
-            sire_name
-        )
-
-        stats_dict = self.calculate_statistics(
-            base_df,
-            sire_df
-        )
-
-        grade = self.get_grade(
-            stats_dict
-        )
-
-        return {
-            "stats": statistics.to_dict(
-                stats_dict
-            ),
-            "grade": grade,
-            "grade_text": self.get_grade_text(
-                grade
-            ),
-        }
-
-    # ==========================================
-    # 坂分析
-    # ==========================================
-
-    def analyze_slope(
-        self,
-        sire_name,
-        slope,
-        sex=None
-    ):
-        """
-        父馬×性別×坂で分析
-        """
-
-        if slope in [None, "", "未指定"]:
-            return None
-
-        base_df = self.filter_base(
-            place=None,
-            distance=None,
-            sex=sex
-        )
-
-        base_df = statistics.filter_by_slope(
-            base_df,
-            slope
-        )
-
-        sire_df = self.filter_sire(
-            base_df,
-            sire_name
-        )
-
-        stats_dict = self.calculate_statistics(
-            base_df,
-            sire_df
-        )
-
-        grade = self.get_grade(
-            stats_dict
-        )
-
-        return {
-            "stats": statistics.to_dict(
-                stats_dict
-            ),
-            "grade": grade,
-            "grade_text": self.get_grade_text(
-                grade
-            ),
-        }
-
-    # ==========================================
-    # 距離区分分析
-    # ==========================================
-
-    def analyze_distance_type(
-        self,
-        sire_name,
-        distance_type,
-        sex=None
-    ):
-        """
-        父馬×性別×距離区分で分析
-        """
-
-        if distance_type in [None, "", "未指定"]:
-            return None
-
-        base_df = self.filter_base(
-            place=None,
-            distance=None,
-            sex=sex
-        )
-
-        base_df = statistics.filter_by_distance_type(
-            base_df,
-            distance_type
-        )
-
-        sire_df = self.filter_sire(
-            base_df,
-            sire_name
-        )
-
-        stats_dict = self.calculate_statistics(
-            base_df,
-            sire_df
-        )
-
-        grade = self.get_grade(
-            stats_dict
-        )
-
-        return {
-            "stats": statistics.to_dict(
-                stats_dict
-            ),
-            "grade": grade,
-            "grade_text": self.get_grade_text(
-                grade
-            ),
-        }
-
-    # ==========================================
-    # 枠番分析
-    # ==========================================
-
-    def analyze_frame(
-        self,
-        sire_name,
-        frame=None,
-        sex=None
-    ):
-        """
-        父馬×性別×枠番分析
-
-        枠順未発表時(frame=None)は分析しない
-        """
-
-        if frame is None:
-            return None
-
-        base_df = self.filter_base(
-            place=None,
-            distance=None,
-            sex=sex
-        )
-
-        base_df = statistics.filter_by_frame(
-            base_df,
-            frame
-        )
-
-        sire_df = self.filter_sire(
-            base_df,
-            sire_name
-        )
-
-        stats_dict = self.calculate_statistics(
-            base_df,
-            sire_df
-        )
-
-        grade = self.get_grade(
-            stats_dict
-        )
-
-        return {
-            "stats": statistics.to_dict(
-                stats_dict
-            ),
-            "grade": grade,
-            "grade_text": self.get_grade_text(
-                grade
-            ),
-        }
-
-    # ==========================================
-    # 馬番分析
-    # ==========================================
-
-    def analyze_horse_no(
-        self,
-        sire_name,
-        horse_no=None,
-        sex=None
-    ):
-        """
-        父馬×性別×馬番分析
-        """
-
-        if horse_no is None:
-            return None
-
-        base_df = self.filter_base(
-            place=None,
-            distance=None,
-            sex=sex
-        )
-
-        base_df = statistics.filter_by_horse_no(
-            base_df,
-            horse_no
-        )
-
-        sire_df = self.filter_sire(
-            base_df,
-            sire_name
-        )
-
-        stats_dict = self.calculate_statistics(
-            base_df,
-            sire_df
-        )
-
-        grade = self.get_grade(
-            stats_dict
-        )
-
-        return {
-            "stats": statistics.to_dict(
-                stats_dict
-            ),
-            "grade": grade,
-            "grade_text": self.get_grade_text(
-                grade
-            ),
-        }
-
-    # ==========================================
-    # 芝クッション値分析
-    # ==========================================
-
-    def analyze_cushion(
-        self,
-        sire_name,
-        cushion,
-        sex=None
-    ):
-        """
-        父馬×性別×クッション値分析
-        """
-
-        if cushion in [None, "", "未指定"]:
-            return None
-
-        base_df = self.filter_base(
-            place=None,
-            distance=None,
-            sex=sex
-        )
-
-        base_df = filter.filter_cushion(
-            base_df,
-            cushion
-        )
-
-        sire_df = self.filter_sire(
-            base_df,
-            sire_name
-        )
-
-        stats_dict = self.calculate_statistics(
-            base_df,
-            sire_df
-        )
-
-        grade = self.get_grade(
-            stats_dict
-        )
-
-        return {
-            "stats": statistics.to_dict(
-                stats_dict
-            ),
-            "grade": grade,
-            "grade_text": self.get_grade_text(
-                grade
-            ),
-        }
-
-    # ==========================================
-    # ダート馬場状態分析
-    # ==========================================
-
-    def analyze_going(
-        self,
-        sire_name,
-        going,
-        sex=None
-    ):
-        """
-        父馬×性別×馬場状態分析
-        """
-
-        if going in [None, "", "未指定"]:
-            return None
-
-        base_df = self.filter_base(
-            place=None,
-            distance=None,
-            sex=sex
-        )
-
-        base_df = filter.filter_going(
-            base_df,
-            going
-        )
-
-        sire_df = self.filter_sire(
-            base_df,
-            sire_name
-        )
-
-        stats_dict = self.calculate_statistics(
-            base_df,
-            sire_df
-        )
-
-        grade = self.get_grade(
-            stats_dict
-        )
-
-        return {
-            "stats": statistics.to_dict(
-                stats_dict
-            ),
-            "grade": grade,
-            "grade_text": self.get_grade_text(
-                grade
-            ),
-        }
-
-    # ==========================================
-    # 根幹・非根幹 好転条件分析
-    # ==========================================
-
-    def analyze_core_distance(
-        self,
-        sire_name,
-        sex=None
-    ):
-        """
-        父馬×性別で根幹・非根幹の好転条件を分析
-
-        戻り値
-        ----------
-        label:
-            "根"   : 根幹距離で好成績
-            "非根" : 非根幹距離で好成績
-            "-"    : 差が小さい / サンプル不足
-
-        注意
-        ----------
-        ・点数化はしない
-        ・結果表の「好転条件」列に使う
-        """
-
-        base_df = self.filter_base(
-            place=None,
-            distance=None,
-            sex=sex
-        )
-
-        if base_df is None:
-            return {
-                "label": "-",
-                "reason": "データ不足",
-                "core": {},
-                "non_core": {},
-            }
-
-        if len(base_df) == 0:
-            return {
-                "label": "-",
-                "reason": "データ不足",
-                "core": {},
-                "non_core": {},
-            }
-
-        base_df = self._clean_columns(
-            base_df
-        )
-
-        distance_col = config.COL_DISTANCE
-
-        if distance_col not in base_df.columns:
-            return {
-                "label": "-",
-                "reason": "距離列なし",
-                "core": {},
-                "non_core": {},
-            }
-
-        sire_df = self.filter_sire(
-            base_df,
-            sire_name
-        )
-
-        if len(sire_df) == 0:
-            return {
-                "label": "-",
-                "reason": "父馬データ不足",
-                "core": {},
-                "non_core": {},
-            }
-
-        sire_df = sire_df.copy()
-
-        sire_df["_distance_int"] = pd.to_numeric(
-            sire_df[distance_col],
-            errors="coerce"
-        )
-
-        sire_df["_is_core"] = sire_df["_distance_int"].apply(
-            self._is_core_distance
-        )
-
-        core_df = sire_df[
-            sire_df["_is_core"] == True
-        ]
-
-        non_core_df = sire_df[
-            sire_df["_is_core"] == False
-        ]
-
-        core_stats = self._calc_simple_rate(
-            core_df
-        )
-
-        non_core_stats = self._calc_simple_rate(
-            non_core_df
-        )
-
-        min_sample = getattr(
-            config,
-            "CORE_DISTANCE_MIN_SAMPLE",
-            5
-        )
-
-        place_diff_threshold = getattr(
-            config,
-            "CORE_DISTANCE_PLACE_DIFF",
-            5.0
-        )
-
-        win_diff_threshold = getattr(
-            config,
-            "CORE_DISTANCE_WIN_DIFF",
-            3.0
-        )
-
-        if core_stats["sample"] < min_sample:
-            return {
-                "label": "-",
-                "reason": "根幹サンプル不足",
-                "core": core_stats,
-                "non_core": non_core_stats,
-            }
-
-        if non_core_stats["sample"] < min_sample:
-            return {
-                "label": "-",
-                "reason": "非根幹サンプル不足",
-                "core": core_stats,
-                "non_core": non_core_stats,
-            }
-
-        win_diff = (
-            core_stats["win_rate"]
-            - non_core_stats["win_rate"]
-        )
-
-        place_diff = (
-            core_stats["place_rate"]
-            - non_core_stats["place_rate"]
-        )
-
-        label = "-"
-        reason = "差が小さい"
-
-        # -----------------------------
-        # 根幹優勢
-        # -----------------------------
-
-        if (
-            place_diff >= place_diff_threshold
-            and win_diff >= 0
-        ) or (
-            win_diff >= win_diff_threshold
-            and place_diff >= 0
-        ):
-
-            label = "根"
-            reason = "根幹優勢"
-
-        # -----------------------------
-        # 非根幹優勢
-        # -----------------------------
-
-        elif (
-            place_diff <= -place_diff_threshold
-            and win_diff <= 0
-        ) or (
-            win_diff <= -win_diff_threshold
-            and place_diff <= 0
-        ):
-
-            label = "非根"
-            reason = "非根幹優勢"
-
-        return {
-            "label": label,
-            "reason": reason,
-            "core": core_stats,
-            "non_core": non_core_stats,
-            "diff": {
-                "win_rate_diff": win_diff,
-                "place_rate_diff": place_diff,
+            "horse_name": horse_name, "sire": sire_name, "sex": sex, "frame": frame, "horse_no": horse_no,
+            "grade": overall_grade, "grade_text": evaluation.judge_text(overall_grade), "total_score": total,
+            "father": father, "bias": bias_result, "stats": effect, "course": course_info,
+            "aptitude_effect": {
+                "win_rate_diff": effect.get("win_rate_diff", 0.0),
+                "place_rate_diff": effect.get("place_rate_diff", 0.0),
+                "aptitude_index": effect.get("aptitude_index", 100),
+                "display": f"{float(effect.get('win_rate_diff',0.0)):+.1f}pt（{int(round(float(effect.get('aptitude_index',100))))}）",
             },
-        }
-
-    # ==========================================
-    # コースID分析
-    # ==========================================
-
-    def analyze_course_id(
-        self,
-        sire_name,
-        course_id,
-        place=None,
-        distance=None,
-        sex=None
-    ):
-        """
-        コースID単位分析
-        """
-
-        base_df = self.filter_base(
-            place=place,
-            distance=distance,
-            sex=sex
-        )
-
-        if course_id is not None:
-
-            base_df = statistics.filter_by_course(
-                base_df,
-                course_id
-            )
-
-        sire_df = self.filter_sire(
-            base_df,
-            sire_name
-        )
-
-        stats_dict = self.calculate_statistics(
-            base_df,
-            sire_df
-        )
-
-        grade = self.get_grade(
-            stats_dict
-        )
-
-        return {
-            "stats": statistics.to_dict(
-                stats_dict
-            ),
-            "grade": grade,
-            "grade_text": self.get_grade_text(
-                grade
-            ),
-        }
-
-    # ==========================================
-    # 統計情報取得
-    # ==========================================
-
-    def get_statistics(
-        self,
-        sire_name,
-        place=None,
-        distance=None,
-        sex=None
-    ):
-        """
-        基本統計のみ取得
-        """
-
-        result = self.analyze(
-            sire_name=sire_name,
-            place=place,
-            distance=distance,
-            sex=sex
-        )
-
-        return statistics.to_dict(
-            result["stats"]
-        )
-
-    # ==========================================
-    # 評価のみ取得
-    # ==========================================
-
-    def get_grade_only(
-        self,
-        sire_name,
-        place=None,
-        distance=None,
-        sex=None
-    ):
-        """
-        評価記号のみ取得
-        """
-
-        result = self.analyze(
-            sire_name=sire_name,
-            place=place,
-            distance=distance,
-            sex=sex
-        )
-
-        return result["grade"]
-
-    # ==========================================
-    # データ存在確認
-    # ==========================================
-
-    def has_data(
-        self,
-        sire_name,
-        place=None,
-        distance=None,
-        sex=None
-    ):
-        """
-        対象データ有無
-        """
-
-        base_df = self.filter_base(
-            place=place,
-            distance=distance,
-            sex=sex
-        )
-
-        sire_df = self.filter_sire(
-            base_df,
-            sire_name
-        )
-
-        return len(sire_df) > 0
-
-    # ==========================================
-    # 総合分析
-    # ==========================================
-
-    def analyze_all(
-        self,
-        horse_name,
-        sire_name,
-        sex,
-        frame=None,
-        horse_no=None,
-        course_id=None,
-        place=None,
-        distance=None,
-        cushion=None,
-        going=None
-    ):
-        """
-        出走馬1頭を総合分析
-        """
-
-        # -----------------------------
-        # 基本条件抽出
-        # 競馬場×距離の評価用
-        # -----------------------------
-
-        base_df = self.filter_base(
-            place=place,
-            distance=distance,
-            sex=sex
-        )
-
-        if course_id is not None:
-
-            base_df = statistics.filter_by_course(
-                base_df,
-                course_id
-            )
-
-        # -----------------------------
-        # コース情報取得
-        # -----------------------------
-
-        course_info = None
-
-        if course_id is not None:
-
-            course_info = self.get_course_info(
-                course_id
-            )
-
-        # -----------------------------
-        # 父馬抽出
-        # -----------------------------
-
-        sire_df = self.filter_sire(
-            base_df,
-            sire_name
-        )
-
-        # -----------------------------
-        # 競馬場×距離 成績
-        # -----------------------------
-
-        stats_dict = self.calculate_statistics(
-            base_df,
-            sire_df
-        )
-
-        grade = self.get_grade(
-            stats_dict
-        )
-
-        # -----------------------------
-        # 父馬適性分析
-        # -----------------------------
-
-        father_result = {}
-
-        result_rl = None
-        result_slope = None
-        result_distance_type = None
-
-        # ① 競馬場×距離
-        father_result["course_distance"] = {
-            "grade": grade,
-            "grade_text": self.get_grade_text(
-                grade
-            ),
-            "stats": statistics.to_dict(
-                stats_dict
-            ),
-        }
-
-        # ② 左右適性
-        right_left = None
-
-        if course_info:
-
-            right_left = course_info.get(
-                "右左"
-            )
-
-        if right_left:
-
-            result_rl = self.analyze_right_left(
-                sire_name=sire_name,
-                right_left=right_left,
-                sex=sex
-            )
-
-            father_result["right_left"] = result_rl
-
-        else:
-
-            father_result["right_left"] = None
-
-        # ③ 坂適性
-        slope = None
-
-        if course_info:
-
-            slope = course_info.get(
-                "坂"
-            )
-
-        if slope:
-
-            result_slope = self.analyze_slope(
-                sire_name=sire_name,
-                slope=slope,
-                sex=sex
-            )
-
-            father_result["slope"] = result_slope
-
-        else:
-
-            father_result["slope"] = None
-
-        # ④ 枠順適性
-        if frame is not None:
-
-            father_result["frame"] = self.analyze_frame(
-                sire_name=sire_name,
-                frame=frame,
-                sex=sex
-            )
-
-        else:
-
-            father_result["frame"] = None
-
-        # ⑤ 馬番適性
-        if horse_no is not None:
-
-            father_result["horse_no"] = self.analyze_horse_no(
-                sire_name=sire_name,
-                horse_no=horse_no,
-                sex=sex
-            )
-
-        else:
-
-            father_result["horse_no"] = None
-
-        # ⑥ 距離区分適性
-        distance_type = None
-
-        if course_info:
-
-            distance_type = course_info.get(
-                "距離区分"
-            )
-
-        if distance_type:
-
-            result_distance_type = self.analyze_distance_type(
-                sire_name=sire_name,
-                distance_type=distance_type,
-                sex=sex
-            )
-
-            father_result["distance_type"] = result_distance_type
-
-        else:
-
-            father_result["distance_type"] = None
-
-        # ⑦ クッション値
-        father_result["cushion"] = None
-
-        if cushion not in [None, "", "未指定"]:
-
-            father_result["cushion"] = self.analyze_cushion(
-                sire_name=sire_name,
-                cushion=cushion,
-                sex=sex
-            )
-
-        # ⑧ 馬場状態
-        father_result["going"] = None
-
-        if going not in [None, "", "未指定"]:
-
-            father_result["going"] = self.analyze_going(
-                sire_name=sire_name,
-                going=going,
-                sex=sex
-            )
-
-        # ⑨ 根幹・非根幹 好転条件
-        father_result["core_distance"] = self.analyze_core_distance(
-            sire_name=sire_name,
-            sex=sex
-        )
-
-        # -----------------------------
-        # コースバイアス分析
-        # -----------------------------
-
-        bias_result = {}
-
-        # ① 枠順バイアス
-        bias_result["frame"] = None
-
-        if frame is not None:
-
-            frame_bias = bias.analyze_frame_bias(
-                base_df,
-                frame
-            )
-
-            if frame_bias is not None:
-
-                frame_bias["grade"] = evaluation.judge_bias(
-                    rank=frame_bias.get(
-                        "rank",
-                        None
-                    ),
-                    total=frame_bias.get(
-                        "total",
-                        0
-                    ),
-                    sample=frame_bias.get(
-                        "sample",
-                        0
-                    ),
-                    diff=frame_bias.get(
-                        "diff",
-                        0.0
-                    ),
-                )
-
-            bias_result["frame"] = frame_bias
-
-        # ② ラッキー馬番
-        bias_result["lucky"] = self.get_lucky_number_rank(
-            place,
-            distance,
-            horse_no
-        )
-
-        # -----------------------------
-        # TOTAL SCORE
-        # -----------------------------
-        # app.py側のSCORE_MAPで再計算するため、
-        # ここは内部参考値として残す。
-        # -----------------------------
-
-        total_score = 0
-
-        for key, value in father_result.items():
-
-            if value is None:
-                continue
-
-            if key == "core_distance":
-                continue
-
-            if isinstance(value, dict) and "grade" in value:
-
-                total_score += evaluation.grade_score(
-                    value["grade"]
-                )
-
-        if bias_result["frame"] is not None:
-
-            total_score += evaluation.grade_score(
-                bias_result["frame"].get(
-                    "grade",
-                    "-"
-                )
-            )
-
-        if bias_result["lucky"] == "★":
-
-            total_score += 1
-
-        # -----------------------------
-        # 戻り値
-        # -----------------------------
-
-        result = {
-            "horse_name": horse_name,
-            "sire": sire_name,
-            "sex": sex,
-            "frame": frame,
-            "horse_no": horse_no,
-
-            # -------------------------
-            # 総合評価
-            # -------------------------
-
-            "grade": grade,
-            "grade_text": self.get_grade_text(
-                grade
-            ),
-            "total_score": total_score,
-
-            # -------------------------
-            # 父馬適性
-            # -------------------------
-
-            "father": father_result,
-
-            # -------------------------
-            # コースバイアス
-            # -------------------------
-
-            "bias": bias_result,
-
-            # -------------------------
-            # 基本統計
-            # -------------------------
-
-            "stats": statistics.to_dict(
-                stats_dict
-            ),
-
-            # -------------------------
-            # コース情報
-            # -------------------------
-
-            "course": course_info,
-
-            # -------------------------
-            # DEBUG
-            # -------------------------
-
-            "debug": {
-                "course_id": course_id,
-                "course_info": course_info,
-                "right_left": right_left,
-                "slope": slope,
-                "distance_type": distance_type,
-                "result_rl": result_rl,
-                "result_slope": result_slope,
-                "result_distance_type": result_distance_type,
-                "core_distance": father_result.get(
-                    "core_distance",
-                    None
-                ),
+            "stat_groups": {
+                "course_distance": round(course_group_score, 4), "surface": round(market_score, 4),
+                "frame": round(frame_score, 4), "bias": round(bias_score, 4),
             },
+            "debug": {"course_id": course_id, "course_info": course_info},
         }
 
-        return result
+    # Compatibility helpers
+    def analyze(self, sire_name, place=None, distance=None, sex=None):
+        result = self._course_distance_result(sire_name, place, distance, None, sex, None)
+        return {"stats": result["stats"], "grade": result["grade"], "grade_text": result["grade_text"]}
+    def get_statistics(self, sire_name, place=None, distance=None, sex=None): return self.analyze(sire_name, place, distance, sex)["stats"]
+    def get_grade_only(self, sire_name, place=None, distance=None, sex=None): return self.analyze(sire_name, place, distance, sex)["grade"]
+    def has_data(self, sire_name, place=None, distance=None, sex=None): return not self._sire_all(sire_name).empty

@@ -82,7 +82,8 @@ def clean_dataframe(df: pd.DataFrame):
 
         config.COL_FRAME,
 
-        config.COL_HORSE_NO
+        config.COL_HORSE_NO,
+        getattr(config, "COL_CORNER_COUNT", "コーナー回数")
 
     ]
 

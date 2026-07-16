@@ -23,7 +23,7 @@ MODULE_DIR = BASE_DIR / "modules"
 # アプリ名
 # ======================================================
 
-APP_NAME = "Sire Analyzer Ver2"
+APP_NAME = "Sire Analyzer Ver5"
 
 # ======================================================
 # CSVファイル
@@ -272,3 +272,22 @@ BIAS_GOOD = 0.50
 
 # 上位75%
 BIAS_NORMAL = 0.75
+# =====================================================
+# Ver5 statistical engine
+# =====================================================
+COL_CORNER_COUNT = "コーナー回数"
+STAT_MIN_SAMPLE = 5
+STAT_CONFIDENCE_SAMPLE = 30
+SEX_POOLING_SAMPLE = 30
+STAT_GRADE_EXCELLENT = 2.5
+STAT_GRADE_GOOD = 0.8
+STAT_GRADE_POOR = -1.2
+COURSE_EXACT_SAMPLE = 20
+COURSE_NEARBY_SAMPLE = 20
+COURSE_DISTANCE_MARGIN = 200
+BIAS_GOOD_DIFF = 3.0
+BIAS_BAD_DIFF = -3.0
+BIAS_SAFE_SAMPLE = 20
+PREDICTION_HISTORY = DATA_DIR / "prediction_history.csv"
+VALIDATION_HISTORY = DATA_DIR / "validation_history.csv"
+RESULT_ENCODING_CANDIDATES = ["cp932", "shift-jis", "utf-8-sig", "utf-8"]
