@@ -1,6 +1,6 @@
 # =====================================================
-# app.py Ver3.6
-# 調教判定CSV自動取得 + 手入力安全読込 + SCORE_MAP + 注目レース一覧 対応版
+# app.py Ver5.0
+# 調教判定CSV自動取得 + 手入力安全読込 + 注目レース一覧 対応版
 # =====================================================
 
 import streamlit as st
@@ -13,13 +13,19 @@ import config
 
 from modules import loader
 from modules.analyzer import SireAnalyzer
+from modules import result_loader, result_transformer, prediction_history, validation
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+MODULES_DIR = BASE_DIR / "modules"
+
 
 
 # =====================================================
 # パス設定
 # =====================================================
 
-TRAINING_CSV_PATH = Path("data") / "調教判定表.csv"
+TRAINING_CSV_PATH = DATA_DIR / "調教判定表.csv"
 
 
 # =====================================================
@@ -287,27 +293,17 @@ def load_training_csv(path):
     return normalize_training_df(df)
 
 
-def get_training_record(
-    training_df,
-    horse_name,
-    course_id=None,
-    race_no=None,
-):
+def get_training_record(training_df, horse_name, course_id=None, race_no=None):
     """
-    調教判定表から1頭分のデータを取得する。
-
-    自動取得モードでは、同一競馬場・同一距離の別レースが
-    混ざらないよう、次の順で照合する。
-
-    1. 馬名
-    2. コースID
-    3. レース番号
-
-    手入力モードではrace_noがNoneになるため、
-    馬名とコースIDで照合する。
+    調教判定表から1頭分のデータを取得
+    基本は 馬名 で照合
+    コースIDがある場合は 馬名 + コースID を優先
     """
 
-    if training_df is None or len(training_df) == 0:
+    if training_df is None:
+        return None
+
+    if len(training_df) == 0:
         return None
 
     if "馬名_key" not in training_df.columns:
@@ -318,63 +314,22 @@ def get_training_record(
     target_horse = normalize_text(horse_name)
     target_course_id = normalize_text(course_id)
 
-    # -----------------------------
-    # 馬名一致
-    # -----------------------------
-
-    hit_df = df[
-        df["馬名_key"] == target_horse
-    ].copy()
+    hit_df = df[df["馬名_key"] == target_horse]
 
     if len(hit_df) == 0:
         return None
 
-    # -----------------------------
-    # コースID一致
-    # -----------------------------
+    if target_course_id != "" and "コースID_key" in hit_df.columns:
+        hit_course_df = hit_df[hit_df["コースID_key"] == target_course_id]
+        if len(hit_course_df) > 0:
+            hit_df = hit_course_df
 
-    if (
-        target_course_id != ""
-        and "コースID_key" in hit_df.columns
-    ):
-        course_hit_df = hit_df[
-            hit_df["コースID_key"] == target_course_id
-        ].copy()
-
-        if len(course_hit_df) == 0:
+    if race_no is not None and "R" in hit_df.columns:
+        race_values = pd.to_numeric(hit_df["R"], errors="coerce")
+        hit_race_df = hit_df[race_values == int(race_no)]
+        if len(hit_race_df) == 0:
             return None
-
-        hit_df = course_hit_df
-
-    # -----------------------------
-    # レース番号一致
-    # -----------------------------
-
-    if race_no is not None:
-        if "R" not in hit_df.columns:
-            return None
-
-        hit_df["R"] = pd.to_numeric(
-            hit_df["R"],
-            errors="coerce",
-        )
-
-        try:
-            target_race_no = int(race_no)
-        except (TypeError, ValueError):
-            return None
-
-        race_hit_df = hit_df[
-            hit_df["R"] == target_race_no
-        ].copy()
-
-        if len(race_hit_df) == 0:
-            return None
-
-        hit_df = race_hit_df
-
-    if len(hit_df) == 0:
-        return None
+        hit_df = hit_race_df
 
     return hit_df.iloc[0].to_dict()
 
@@ -485,84 +440,7 @@ COLUMN_MAP = {
 }
 
 
-# -----------------------------------------------------
-# 適性判定 点数配点
-# -----------------------------------------------------
-
-SCORE_MAP = {
-    "競馬場×距離": {
-        "◎": 6,
-        "○": 4,
-        "△": 0,
-        "×": -4,
-        "-": 0,
-    },
-    "距離区分": {
-        "◎": 4,
-        "○": 3,
-        "△": 0,
-        "×": -3,
-        "-": 0,
-    },
-    "クッション": {
-        "◎": 4,
-        "○": 3,
-        "△": 0,
-        "×": -3,
-        "-": 0,
-    },
-    "馬場状態": {
-        "◎": 4,
-        "○": 3,
-        "△": 0,
-        "×": -3,
-        "-": 0,
-    },
-    "左右": {
-        "◎": 3,
-        "○": 2,
-        "△": 0,
-        "×": -2,
-        "-": 0,
-    },
-    "坂": {
-        "◎": 3,
-        "○": 2,
-        "△": 0,
-        "×": -2,
-        "-": 0,
-    },
-    "枠適性": {
-        "◎": 3,
-        "○": 2,
-        "△": 0,
-        "×": -2,
-        "-": 0,
-    },
-    "馬番適性": {
-        "◎": 1,
-        "○": 1,
-        "△": 0,
-        "×": -1,
-        "-": 0,
-    },
-    "枠バイアス": {
-        "◎": 3,
-        "○": 2,
-        "△": 0,
-        "×": -2,
-        "-": 0,
-    },
-    "Lucky": {
-        "★": 2,
-        "◎": 2,
-        "○": 1,
-        "△": 0,
-        "×": -1,
-        "-": 0,
-    },
-}
-
+# Ver5ではSCORE_MAPを使用せず、各統計項目の連続StatScoreを使用します。
 
 def find_column(df, aliases):
     """
@@ -872,30 +750,6 @@ def apply_jirai_downgrade(final_judgement, jirai_value):
     return downgraded, "地雷ラップ：強制降格"
 
 
-def calculate_total_score(row):
-    """
-    SCORE_MAPに基づいてTOTALを再計算する
-    配点変更は SCORE_MAP だけ直せば反映される
-    """
-
-    total = 0
-
-    for col, score_dict in SCORE_MAP.items():
-        if col not in row:
-            continue
-
-        mark = row.get(col, "-")
-
-        if mark is None:
-            mark = "-"
-
-        mark = str(mark).strip()
-
-        total += score_dict.get(mark, 0)
-
-    return total
-
-
 def count_effective_good_grades(row):
     """
     重複を避けた有効適性一致数を数える。
@@ -915,6 +769,7 @@ def count_effective_good_grades(row):
         row.get("距離区分", "-"),
         row.get("左右", "-"),
         row.get("坂", "-"),
+        row.get("コーナー", "-"),
     ]
 
     if course_distance_main in ["◎", "○"]:
@@ -971,6 +826,7 @@ def count_effective_bad_grades(row):
                 row.get("距離区分", "-"),
                 row.get("左右", "-"),
                 row.get("坂", "-"),
+                row.get("コーナー", "-"),
             ]
             if mark == "×"
         )
@@ -1001,100 +857,41 @@ def count_effective_bad_grades(row):
     return count
 
 def judge_final_result(row):
-    """
-    調教判定 + 血統適性 + バイアス + 地雷ラップで最終判定
-
-    方針
-    ----------
-    ・調教本命、調教相手は点数ではなく判定ルートとして使う
-    ・評価下げは、明確な不安材料がある場合を中心に使う
-    ・不安材料が0なら、TOTALが低くても原則として評価下げにしない
-    ・地雷ラップは最後に強制降格
-    """
-
-    total = row.get("TOTAL", 0)
-
+    """Ver5 final judgement based on training route and continuous statistics."""
     try:
-        total = float(total)
+        total = float(row.get("TOTAL", 0) or 0)
     except Exception:
-        total = 0
-
+        total = 0.0
     training_honmei = is_positive_mark(row.get("調教本命", ""))
     training_aite = is_positive_mark(row.get("調教相手", ""))
-
-    good_count = row.get("適性一致数", 0)
-    bad_count = row.get("不安材料数", 0)
-
-    try:
-        good_count = int(good_count)
-    except Exception:
-        good_count = 0
-
-    try:
-        bad_count = int(bad_count)
-    except Exception:
-        bad_count = 0
-
-    # -----------------------------
-    # 調教本命馬
-    # -----------------------------
+    good_count = int(row.get("適性一致数", 0) or 0)
+    bad_count = int(row.get("不安材料数", 0) or 0)
 
     if training_honmei:
-        if bad_count >= 3:
+        if bad_count >= 2:
             judgement = "評価下げ"
-        elif total >= 22 and bad_count <= 1:
+        elif total >= 1.0 and good_count >= 2:
             judgement = "本命継続"
-        elif total >= 16 and bad_count <= 2:
-            judgement = "本命注意"
-        elif bad_count == 0:
-            judgement = "本命注意"
         else:
-            judgement = "評価下げ"
-
-    # -----------------------------
-    # 調教相手馬
-    # -----------------------------
-
+            judgement = "本命注意"
     elif training_aite:
-        if bad_count >= 3:
+        if bad_count >= 2:
             judgement = "評価下げ"
-        elif total >= 22 and good_count >= 4 and bad_count <= 1:
+        elif total >= 0.5 and good_count >= 2:
             judgement = "相手昇格"
-        elif total >= 14 and bad_count <= 2:
-            judgement = "相手候補"
-        elif bad_count == 0:
-            judgement = "相手候補"
         else:
-            judgement = "評価下げ"
-
-    # -----------------------------
-    # 調教印なし馬
-    # -----------------------------
-
+            judgement = "相手候補"
     else:
-        if bad_count >= 3:
+        if bad_count >= 2:
             judgement = "評価下げ"
-        elif total >= 22 and good_count >= 4 and bad_count <= 1:
+        elif total >= 1.5 and good_count >= 3:
             judgement = "穴候補"
-        elif total >= 16 and good_count >= 3 and bad_count <= 2:
-            judgement = "相手候補"
-        elif bad_count == 0 and good_count >= 2:
-            judgement = "相手候補"
-        elif bad_count == 0:
+        elif total >= 0.5 and good_count >= 2:
             judgement = "相手候補"
         else:
             judgement = "評価下げ"
 
-    # -----------------------------
-    # 地雷ラップによる強制降格
-    # -----------------------------
-
-    judgement, jirai_memo = apply_jirai_downgrade(
-        judgement,
-        row.get("地雷ラップ", ""),
-    )
-
-    return judgement, jirai_memo
+    return apply_jirai_downgrade(judgement, row.get("地雷ラップ", ""))
 
 def safe_get_grade(value):
     """
@@ -1182,6 +979,10 @@ def build_judgement_row_from_result(
         father.get("distance_type")
     )
 
+    row["コーナー"] = safe_get_grade(
+        father.get("corner_count")
+    )
+
     row["枠適性"] = safe_get_grade(
         father.get("frame")
     )
@@ -1217,7 +1018,7 @@ def build_judgement_row_from_result(
         row["調教相手"] = training_record.get("調教相手", "-")
         row["地雷ラップ"] = training_record.get("地雷ラップ判定", "-")
 
-    row["TOTAL"] = calculate_total_score(row)
+    row["TOTAL"] = float(result.get("total_score", 0.0) or 0.0)
     row["適性一致数"] = count_effective_good_grades(row)
     row["不安材料数"] = count_effective_bad_grades(row)
 
@@ -1411,7 +1212,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🏇 競馬分析アプリ Ver3.7")
+st.title("🏇 競馬分析アプリ Ver3.3")
 
 
 # =====================================================
@@ -1715,35 +1516,6 @@ if surface == "芝":
 
 
 # =====================================================
-# 分析条件変更時の前回結果クリア
-# =====================================================
-
-current_analysis_key = (
-    str(input_mode),
-    str(place),
-    int(race_no) if race_no is not None else None,
-    str(surface),
-    int(distance),
-    str(sex),
-    str(cushion),
-    str(going),
-)
-
-previous_analysis_key = st.session_state.get(
-    "analysis_condition_key"
-)
-
-if (
-    previous_analysis_key is not None
-    and previous_analysis_key != current_analysis_key
-):
-    st.session_state.pop("results", None)
-    st.session_state.pop("results_context", None)
-
-st.session_state["analysis_condition_key"] = current_analysis_key
-
-
-# =====================================================
 # トップページ：相手候補以上レース一覧
 # =====================================================
 
@@ -1945,16 +1717,6 @@ if run:
     progress.empty()
 
     st.session_state["results"] = results
-    st.session_state["results_context"] = {
-        "input_mode": input_mode,
-        "place": place,
-        "race_no": race_no,
-        "surface": surface,
-        "distance": int(distance),
-        "sex": sex,
-        "cushion": cushion,
-        "going": going,
-    }
 
     st.success("分析が完了しました。")
 
@@ -1968,14 +1730,6 @@ if "results" in st.session_state:
     st.subheader("分析結果")
 
     results = st.session_state["results"]
-    results_context = st.session_state.get(
-        "results_context",
-        {},
-    )
-    result_race_no = results_context.get(
-        "race_no",
-        race_no,
-    )
 
     results = [
         r for r in results
@@ -2053,6 +1807,16 @@ if "results" in st.session_state:
         for r in results
     ]
 
+    result_df["コーナー"] = [
+        safe_get_grade(r["father"].get("corner_count"))
+        for r in results
+    ]
+
+    result_df["適性効果"] = [
+        r.get("aptitude_effect", {}).get("display", "±0.0pt（100）")
+        for r in results
+    ]
+
     result_df["好転条件"] = [
         "-"
         if r["father"].get("core_distance") is None
@@ -2087,7 +1851,7 @@ if "results" in st.session_state:
             training_df=training_df,
             horse_name=r["horse_name"],
             course_id=course_id,
-            race_no=result_race_no,
+            race_no=race_no if "race_no" in globals() else None,
         )
 
         training_records.append(record)
@@ -2173,18 +1937,9 @@ if "results" in st.session_state:
         ]
 
     # -----------------------------
-    # SCORE_MAPでTOTALを再計算
+    # Ver5: analyzerの連続StatScoreを使用
     # -----------------------------
-
-    result_df["TOTAL"] = result_df.apply(
-        calculate_total_score,
-        axis=1,
-    )
-
-    result_df["TOTAL"] = pd.to_numeric(
-        result_df["TOTAL"],
-        errors="coerce",
-    ).fillna(0)
+    result_df["TOTAL"] = pd.to_numeric(result_df["TOTAL"], errors="coerce").fillna(0).round(3)
 
     # -----------------------------
     # 推奨度
@@ -2193,13 +1948,13 @@ if "results" in st.session_state:
     recommend = []
 
     for score in result_df["TOTAL"]:
-        if score >= 26:
+        if score >= 4.0:
             recommend.append("★★★★★")
-        elif score >= 22:
+        elif score >= 2.5:
             recommend.append("★★★★☆")
-        elif score >= 18:
+        elif score >= 1.0:
             recommend.append("★★★☆☆")
-        elif score >= 14:
+        elif score >= 0.0:
             recommend.append("★★☆☆☆")
         else:
             recommend.append("★☆☆☆☆")
@@ -2235,6 +1990,29 @@ if "results" in st.session_state:
 
     result_df["最終判定"] = final_results
     result_df["地雷補正"] = jirai_memos
+
+    # -----------------------------
+    # Ver5: 予想履歴を自動保存
+    # -----------------------------
+    history_df = result_df.copy()
+    history_df["場所"] = place
+    history_df["R"] = race_no if "race_no" in globals() else ""
+    history_df["芝・ダ"] = surface
+    history_df["距離"] = distance
+    history_df["レースID"] = [
+        "" if rec is None else rec.get("レースID", "") for rec in training_records
+    ]
+    history_df["血統登録番号"] = [
+        "" if rec is None else rec.get("血統登録番号", "") for rec in training_records
+    ]
+    history_df["年月日"] = [
+        "" if rec is None else rec.get("年月日", "") for rec in training_records
+    ]
+    if history_df["レースID"].astype(str).str.strip().ne("").any():
+        try:
+            prediction_history.save_predictions(history_df)
+        except Exception as history_error:
+            st.warning(f"予想履歴の保存に失敗しました: {history_error}")
 
     # -----------------------------
     # TOTAL順ソート
@@ -2279,6 +2057,7 @@ if "results" in st.session_state:
         "最終判定",
         "地雷補正",
         "TOTAL",
+        "適性効果",
         "総合評価",
         "調教本命",
         "調教相手",
@@ -2321,11 +2100,11 @@ if "results" in st.session_state:
 
     def color_total(val):
         try:
-            if val >= 26:
+            if val >= 4.0:
                 return "background-color:#FFD700;font-weight:bold"
-            elif val >= 22:
+            elif val >= 2.5:
                 return "background-color:#FFF59D"
-            elif val >= 18:
+            elif val >= 1.0:
                 return "background-color:#E8F5E9"
         except Exception:
             pass
@@ -2377,6 +2156,7 @@ if "results" in st.session_state:
         "競馬場×距離",
         "左右",
         "坂",
+        "コーナー",
         "枠適性",
         "馬番適性",
         "距離区分",
@@ -2442,3 +2222,31 @@ if "results" in st.session_state:
         use_container_width=True,
         hide_index=True,
     )
+
+
+# =====================================================
+# Ver5 検証機能
+# =====================================================
+st.divider()
+st.header("Ver5 検証")
+st.caption("TARGETのヘッダーなし『オッズ成績データA』をそのままアップロードしてください。")
+result_upload = st.file_uploader("TARGET結果CSV", type=["csv"], key="ver5_result_upload")
+if result_upload is not None:
+    try:
+        race_result_df = result_loader.load_target_result_csv(result_upload)
+        horse_result_df = result_transformer.transform_results(race_result_df)
+        prediction_df = prediction_history.load_predictions()
+        validation_df = validation.create_validation_history(prediction_df, horse_result_df)
+        st.success(f"{len(validation_df)}頭分の検証履歴を更新しました。")
+        if not validation_df.empty:
+            tab1, tab2, tab3 = st.tabs(["最終判定別", "適性項目別", "検証履歴"])
+            with tab1:
+                st.dataframe(validation.summarize_by(validation_df, "最終判定"), use_container_width=True, hide_index=True)
+            with tab2:
+                target_col = st.selectbox("検証項目", [c for c in ["競馬場×距離","左右","坂","コーナー","距離区分","枠適性","馬番適性","クッション","馬場状態","枠バイアス"] if c in validation_df.columns])
+                st.dataframe(validation.summarize_by(validation_df, target_col), use_container_width=True, hide_index=True)
+            with tab3:
+                st.dataframe(validation_df, use_container_width=True, hide_index=True)
+                st.download_button("検証履歴CSVをダウンロード", validation_df.to_csv(index=False).encode("utf-8-sig"), "validation_history.csv", "text/csv")
+    except Exception as validation_error:
+        st.error(f"結果CSVの検証処理でエラーが発生しました: {validation_error}")
