@@ -229,12 +229,31 @@ def filter_going(
     going=None
 ) -> pd.DataFrame:
     """
-    ダート馬場状態
+    ダート馬場状態で抽出する。
+
+    TARGETのマスタでは「稍重」「不良」が「稍」「不」で保存される場合があるため、
+    画面入力とCSV値を同じ表記へ正規化してから比較する。
     """
 
-    if going in [None, "", "未判明"]:
+    if going in [None, "", "未指定", "未判明"]:
         return df
 
-    return df[
-        df[config.COL_GOING] == going
-    ]
+    if config.COL_GOING not in df.columns:
+        return df.iloc[0:0].copy()
+
+    def normalize_going(value):
+        text = str(value).strip()
+        mapping = {
+            "良": "良",
+            "稍": "稍重",
+            "稍重": "稍重",
+            "重": "重",
+            "不": "不良",
+            "不良": "不良",
+        }
+        return mapping.get(text, text)
+
+    target = normalize_going(going)
+    normalized_series = df[config.COL_GOING].map(normalize_going)
+
+    return df[normalized_series == target].copy()
