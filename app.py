@@ -191,6 +191,31 @@ def make_unique_columns(columns):
     return new_columns
 
 
+def format_a3_high_win_lap(value):
+    """
+    調教判定表の「A3高勝率Lap」を画面表示用に変換する。
+
+    CSV上で「〇」または「○」の場合は「★」、
+    「なし」の場合は「なし」、欠損時は「-」を返す。
+    """
+
+    if value is None or pd.isna(value):
+        return "-"
+
+    text = str(value).strip()
+
+    if text in {"〇", "○"}:
+        return "★"
+
+    if text == "なし":
+        return "なし"
+
+    if text == "":
+        return "-"
+
+    return text
+
+
 def normalize_training_df(training_df):
     """
     調教判定表の列名をアプリ用に整理
@@ -741,7 +766,8 @@ def apply_jirai_downgrade(final_judgement, jirai_value):
         "本命注意": "評価下げ",
         "相手昇格": "相手候補",
         "相手候補": "評価下げ",
-        "穴候補": "評価下げ",
+        "穴候補": "様子見",
+        "様子見": "評価下げ",
         "評価下げ": "評価下げ",
     }
 
@@ -859,7 +885,7 @@ def count_effective_bad_grades(row):
 def judge_final_result(row):
     """Ver5 final judgement based on training route and continuous statistics."""
     try:
-        total = float(row.get("TOTAL", 0) or 0)
+        total = float(row.get("StatScore", 0) or 0)
     except Exception:
         total = 0.0
     training_honmei = is_positive_mark(row.get("調教本命", ""))
@@ -889,9 +915,9 @@ def judge_final_result(row):
         elif total >= 0.5 and good_count >= 2:
             judgement = "相手候補"
         else:
-            judgement = "評価下げ"
+            judgement = "様子見"
 
-    return apply_jirai_downgrade(judgement, row.get("地雷ラップ", ""))
+    return apply_jirai_downgrade(judgement, row.get("地雷ラップ判定", ""))
 
 def safe_get_grade(value):
     """
@@ -1012,13 +1038,13 @@ def build_judgement_row_from_result(
     if training_record is None:
         row["調教本命"] = "-"
         row["調教相手"] = "-"
-        row["地雷ラップ"] = "-"
+        row["地雷ラップ判定"] = "-"
     else:
         row["調教本命"] = training_record.get("調教本命", "-")
         row["調教相手"] = training_record.get("調教相手", "-")
-        row["地雷ラップ"] = training_record.get("地雷ラップ判定", "-")
+        row["地雷ラップ判定"] = training_record.get("地雷ラップ判定", "-")
 
-    row["TOTAL"] = float(result.get("total_score", 0.0) or 0.0)
+    row["StatScore"] = float(result.get("total_score", 0.0) or 0.0)
     row["適性一致数"] = count_effective_good_grades(row)
     row["不安材料数"] = count_effective_bad_grades(row)
 
@@ -1181,7 +1207,7 @@ def create_top_race_summary_by_full_analysis(
                 "父": record.get("父", ""),
                 "調教本命": record.get("調教本命", "-"),
                 "調教相手": record.get("調教相手", "-"),
-                "TOTAL": row_for_judge["TOTAL"],
+                "StatScore": row_for_judge["StatScore"],
                 "適性一致数": row_for_judge["適性一致数"],
                 "不安材料数": row_for_judge["不安材料数"],
                 "最終判定": final_judgement,
@@ -1197,7 +1223,7 @@ def create_top_race_summary_by_full_analysis(
     result_df = pd.DataFrame(rows)
 
     result_df = result_df.sort_values(
-        ["場所", "R", "TOTAL"],
+        ["場所", "R", "StatScore"],
         ascending=[True, True, False],
     ).reset_index(drop=True)
 
@@ -1208,11 +1234,11 @@ def create_top_race_summary_by_full_analysis(
 # =====================================================
 
 st.set_page_config(
-    page_title="競馬分析アプリ",
+    page_title="競馬分析アプリ Ver5",
     layout="wide",
 )
 
-st.title("🏇 競馬分析アプリ Ver3.3")
+st.title("🏇 競馬分析アプリ Ver5")
 
 
 # =====================================================
@@ -1763,12 +1789,12 @@ if "results" in st.session_state:
         for r in results
     ]
 
-    result_df["総合評価"] = [
+    result_df["統計評価"] = [
         r["grade"]
         for r in results
     ]
 
-    result_df["TOTAL"] = [
+    result_df["StatScore"] = [
         r["total_score"]
         for r in results
     ]
@@ -1877,6 +1903,13 @@ if "results" in st.session_state:
         for record in training_records
     ]
 
+    result_df["A3高勝率Lap"] = [
+        "-"
+        if record is None
+        else format_a3_high_win_lap(record.get("A3高勝率Lap", "-"))
+        for record in training_records
+    ]
+
     result_df["調教コース判定"] = [
         "-"
         if record is None
@@ -1884,7 +1917,7 @@ if "results" in st.session_state:
         for record in training_records
     ]
 
-    result_df["地雷ラップ"] = [
+    result_df["地雷ラップ判定"] = [
         "-"
         if record is None
         else record.get("地雷ラップ判定", "-")
@@ -1939,7 +1972,7 @@ if "results" in st.session_state:
     # -----------------------------
     # Ver5: analyzerの連続StatScoreを使用
     # -----------------------------
-    result_df["TOTAL"] = pd.to_numeric(result_df["TOTAL"], errors="coerce").fillna(0).round(3)
+    result_df["StatScore"] = pd.to_numeric(result_df["StatScore"], errors="coerce").fillna(0).round(3)
 
     # -----------------------------
     # 推奨度
@@ -1947,7 +1980,7 @@ if "results" in st.session_state:
 
     recommend = []
 
-    for score in result_df["TOTAL"]:
+    for score in result_df["StatScore"]:
         if score >= 4.0:
             recommend.append("★★★★★")
         elif score >= 2.5:
@@ -2015,11 +2048,11 @@ if "results" in st.session_state:
             st.warning(f"予想履歴の保存に失敗しました: {history_error}")
 
     # -----------------------------
-    # TOTAL順ソート
+    # StatScore順ソート
     # -----------------------------
 
     result_df = result_df.sort_values(
-        "TOTAL",
+        "StatScore",
         ascending=False,
     ).reset_index(drop=True)
 
@@ -2052,17 +2085,20 @@ if "results" in st.session_state:
         "馬番",
         "順位",
         "馬名",
-        "父",
-        "推奨度",
         "最終判定",
-        "地雷補正",
-        "TOTAL",
-        "適性効果",
-        "総合評価",
+        "統計評価",
         "調教本命",
         "調教相手",
-        "地雷ラップ",
         "調教師判定",
+        "A3高勝率Lap",
+        "地雷ラップ判定",
+        "枠バイアス",
+        "Lucky",
+        "StatScore",
+        "適性効果",
+        "父",
+        "推奨度",
+        "地雷補正",
         "調教コース判定",
         "ZI",
         "脚質",
@@ -2132,6 +2168,8 @@ if "results" in st.session_state:
             return "background-color:#E8F5E9;color:black"
         elif val == "穴候補":
             return "background-color:#9C27B0;color:white;font-weight:bold"
+        elif val == "様子見":
+            return "background-color:#EEEEEE;color:black"
         elif val == "評価下げ":
             return "background-color:#F44336;color:white;font-weight:bold"
 
@@ -2152,7 +2190,7 @@ if "results" in st.session_state:
     style_obj = result_df.style
 
     grade_cols = [
-        "総合評価",
+        "統計評価",
         "競馬場×距離",
         "左右",
         "坂",
@@ -2177,10 +2215,10 @@ if "results" in st.session_state:
             subset=grade_cols,
         )
 
-    if "TOTAL" in result_df.columns:
+    if "StatScore" in result_df.columns:
         style_obj = style_obj.map(
             color_total,
-            subset=["TOTAL"],
+            subset=["StatScore"],
         )
 
     if "推奨度" in result_df.columns:
@@ -2196,7 +2234,7 @@ if "results" in st.session_state:
         )
 
     jirai_cols = [
-        col for col in ["地雷ラップ", "地雷補正"]
+        col for col in ["地雷ラップ判定", "地雷補正"]
         if col in result_df.columns
     ]
 
