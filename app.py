@@ -766,7 +766,7 @@ def apply_jirai_downgrade(final_judgement, jirai_value):
         "本命注意": "評価下げ",
         "相手昇格": "相手候補",
         "相手候補": "評価下げ",
-        "穴候補": "様子見",
+        "穴候補": "評価下げ",
         "様子見": "評価下げ",
         "評価下げ": "評価下げ",
     }
@@ -883,41 +883,60 @@ def count_effective_bad_grades(row):
     return count
 
 def judge_final_result(row):
-    """Ver5 final judgement based on training route and continuous statistics."""
-    try:
-        total = float(row.get("StatScore", 0) or 0)
-    except Exception:
-        total = 0.0
+    """
+    Ver5 最終判定（確定版）。
+
+    優先順位
+    1. 調教本命〇 または A3高勝率Lap★ → 本命継続
+    2. 調教相手〇 + 統計評価◎/○ → 相手昇格
+    3. 調教相手〇、調教師判定〇、統計評価◎/○ → 相手候補
+    4. 統計評価△ + プラス材料あり → 穴候補
+    5. 統計評価△/▲ + プラス材料なし → 様子見
+    6. 統計評価× → 評価下げ
+
+    地雷ラップは基礎判定の後に強制降格する。
+    """
+
+    stat_grade = str(row.get("統計評価", "-") or "-").strip()
     training_honmei = is_positive_mark(row.get("調教本命", ""))
     training_aite = is_positive_mark(row.get("調教相手", ""))
-    good_count = int(row.get("適性一致数", 0) or 0)
-    bad_count = int(row.get("不安材料数", 0) or 0)
+    trainer_positive = is_positive_mark(row.get("調教師判定", ""))
 
-    if training_honmei:
-        if bad_count >= 2:
-            judgement = "評価下げ"
-        elif total >= 1.0 and good_count >= 2:
-            judgement = "本命継続"
-        else:
-            judgement = "本命注意"
-    elif training_aite:
-        if bad_count >= 2:
-            judgement = "評価下げ"
-        elif total >= 0.5 and good_count >= 2:
-            judgement = "相手昇格"
-        else:
-            judgement = "相手候補"
+    a3_value = str(row.get("A3高勝率Lap", "") or "").strip()
+    a3_high_win = a3_value == "★" or is_positive_mark(a3_value)
+
+    try:
+        good_count = int(row.get("適性一致数", 0) or 0)
+    except (TypeError, ValueError):
+        good_count = 0
+
+    # A3高勝率Lap★は、調教本命〇と同格で扱う。
+    if training_honmei or a3_high_win:
+        judgement = "本命継続"
+
+    elif training_aite and stat_grade in {"◎", "○"}:
+        judgement = "相手昇格"
+
+    elif training_aite or trainer_positive or stat_grade in {"◎", "○"}:
+        judgement = "相手候補"
+
+    elif stat_grade == "△" and good_count >= 1:
+        judgement = "穴候補"
+
+    elif stat_grade in {"△", "▲"}:
+        judgement = "様子見"
+
+    elif stat_grade == "×":
+        judgement = "評価下げ"
+
     else:
-        if bad_count >= 2:
-            judgement = "評価下げ"
-        elif total >= 1.5 and good_count >= 3:
-            judgement = "穴候補"
-        elif total >= 0.5 and good_count >= 2:
-            judgement = "相手候補"
-        else:
-            judgement = "様子見"
+        # 未判定・データ不足時は積極評価せず中立扱い。
+        judgement = "様子見"
 
-    return apply_jirai_downgrade(judgement, row.get("地雷ラップ判定", ""))
+    return apply_jirai_downgrade(
+        judgement,
+        row.get("地雷ラップ判定", ""),
+    )
 
 def safe_get_grade(value):
     """
