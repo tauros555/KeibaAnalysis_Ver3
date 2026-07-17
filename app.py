@@ -887,9 +887,9 @@ def judge_final_result(row):
     Ver5 最終判定（確定版）。
 
     優先順位
+    0. 枠バイアス×・馬場状態×・クッション値× → 原則評価下げ（調教本命〇／A3高勝率Lap★は本命注意）
     1. 調教本命〇 または A3高勝率Lap★ → 本命継続
-       ただし、地雷ラップ〇・クッション値×・競馬場×距離×・枠バイアス×の
-       いずれかがあれば本命注意
+       ただし、地雷ラップ〇・競馬場×距離×のいずれかがあれば本命注意
     2. 調教相手〇 + 統計評価◎/○ → 相手昇格
     3. 調教相手〇、調教師判定〇、統計評価◎/○ → 相手候補
     4. 統計評価△ + プラス材料あり → 穴候補
@@ -926,16 +926,31 @@ def judge_final_result(row):
     frame_bias_grade = str(row.get("枠バイアス", "-") or "-").strip()
     jirai_exists = has_jirai_lap(row.get("地雷ラップ判定", ""))
 
-    caution_factors = []
+    going_grade = str(row.get("馬場状態", "-") or "-").strip()
+
+    # 最優先の強制評価下げ条件。
+    # 調教本命・A3高勝率Lap・統計評価など、ほかの条件より必ず優先する。
+    forced_down_factors = []
+    if frame_bias_grade == "×":
+        forced_down_factors.append("枠バイアス×")
+    if going_grade == "×":
+        forced_down_factors.append("馬場状態×")
     if cushion_grade == "×":
-        caution_factors.append("クッション値×")
+        forced_down_factors.append("クッション値×")
+
+    if forced_down_factors:
+        # 例外：調教本命〇またはA3高勝率Lap★に該当する馬は、
+        # 強制評価下げ条件があっても「本命注意」に留める。
+        if primary_signal:
+            return "本命注意", " / ".join(forced_down_factors)
+        return "評価下げ", " / ".join(forced_down_factors)
+
+    caution_factors = []
     if course_distance_grade == "×":
         caution_factors.append("競馬場・距離×")
-    if frame_bias_grade == "×":
-        caution_factors.append("枠バイアス×")
 
     # 調教本命〇またはA3高勝率Lap★でも、
-    # 地雷ラップまたは指定された×評価があれば本命注意。
+    # 地雷ラップまたは競馬場・距離×があれば本命注意。
     if primary_signal:
         if jirai_exists:
             return "本命注意", "地雷ラップ：本命注意"
