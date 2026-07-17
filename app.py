@@ -888,6 +888,8 @@ def judge_final_result(row):
 
     優先順位
     1. 調教本命〇 または A3高勝率Lap★ → 本命継続
+       ただし、地雷ラップ〇・クッション値×・競馬場×距離×・枠バイアス×の
+       いずれかがあれば本命注意
     2. 調教相手〇 + 統計評価◎/○ → 相手昇格
     3. 調教相手〇、調教師判定〇、統計評価◎/○ → 相手候補
     4. 統計評価△ + プラス材料あり → 穴候補
@@ -910,9 +912,36 @@ def judge_final_result(row):
     except (TypeError, ValueError):
         good_count = 0
 
-    # A3高勝率Lap★は、調教本命〇と同格で扱う。
-    if training_honmei or a3_high_win:
-        judgement = "本命継続"
+    # 本命系シグナル。A3高勝率Lap★は調教本命〇と同格で扱う。
+    primary_signal = training_honmei or a3_high_win
+
+    # 本命注意にする追加の不安条件。
+    # 表示名の揺れに備えて、旧名・新名の両方を確認する。
+    cushion_grade = str(
+        row.get("クッション", row.get("クッション値", "-")) or "-"
+    ).strip()
+    course_distance_grade = str(
+        row.get("競馬場×距離", row.get("競馬場・距離", "-")) or "-"
+    ).strip()
+    frame_bias_grade = str(row.get("枠バイアス", "-") or "-").strip()
+    jirai_exists = has_jirai_lap(row.get("地雷ラップ判定", ""))
+
+    caution_factors = []
+    if cushion_grade == "×":
+        caution_factors.append("クッション値×")
+    if course_distance_grade == "×":
+        caution_factors.append("競馬場・距離×")
+    if frame_bias_grade == "×":
+        caution_factors.append("枠バイアス×")
+
+    # 調教本命〇またはA3高勝率Lap★でも、
+    # 地雷ラップまたは指定された×評価があれば本命注意。
+    if primary_signal:
+        if jirai_exists:
+            return "本命注意", "地雷ラップ：本命注意"
+        if caution_factors:
+            return "本命注意", " / ".join(caution_factors)
+        return "本命継続", "-"
 
     elif training_aite and stat_grade in {"◎", "○"}:
         judgement = "相手昇格"
@@ -1057,10 +1086,16 @@ def build_judgement_row_from_result(
     if training_record is None:
         row["調教本命"] = "-"
         row["調教相手"] = "-"
+        row["調教師判定"] = "-"
+        row["A3高勝率Lap"] = "-"
         row["地雷ラップ判定"] = "-"
     else:
         row["調教本命"] = training_record.get("調教本命", "-")
         row["調教相手"] = training_record.get("調教相手", "-")
+        row["調教師判定"] = training_record.get("調教師判定", "-")
+        row["A3高勝率Lap"] = format_a3_high_win_lap(
+            training_record.get("A3高勝率Lap", "-")
+        )
         row["地雷ラップ判定"] = training_record.get("地雷ラップ判定", "-")
 
     row["StatScore"] = float(result.get("total_score", 0.0) or 0.0)
