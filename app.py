@@ -2357,3 +2357,4 @@ if result_upload is not None:
                 st.download_button("検証履歴CSVをダウンロード", validation_df.to_csv(index=False).encode("utf-8-sig"), "validation_history.csv", "text/csv")
     except Exception as validation_error:
         st.error(f"結果CSVの検証処理でエラーが発生しました: {validation_error}")
+
