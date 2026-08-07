@@ -170,13 +170,13 @@ class SireAnalyzer:
         return self._analyze_selector(sire_name, lambda d: d[pd.to_numeric(d[config.COL_HORSE_NO], errors="coerce") == int(horse_no)] if config.COL_HORSE_NO in d.columns else d.iloc[0:0], sex, f"馬番{horse_no}")
 
     def analyze_cushion(self, sire_name, cushion, sex=None):
-        if cushion in [None, "", "未指定"]: return None
-        # Ver6: live numeric cushion, adaptive ±0.3 -> ±0.5 -> ±0.8
-        result = cushion_analyzer.analyze_sire_cushion(self.race_df, sire_name, cushion, sex)
-        if result is not None:
-            return result
-        # backward-compatible fallback for old grouped input
-        return self._analyze_selector(sire_name, lambda d: race_filter.filter_cushion(d, cushion), sex, f"クッション:{cushion}")
+        if cushion in [None, "", "未指定"]:
+            return None
+        # Ver6.1: numeric cushion only.
+        # Old fixed cushion-group fallback is intentionally disabled.
+        return cushion_analyzer.analyze_sire_cushion(
+            self.race_df, sire_name, cushion, sex
+        )
 
     def analyze_going(self, sire_name, going, sex=None):
         if going in [None, "", "未指定", "未判明"]: return None

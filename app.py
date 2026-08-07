@@ -1,5 +1,5 @@
 # =====================================================
-# app.py Ver6.0
+# app.py Ver6.1
 # 芝・ダート別最終評価 + 調教師/騎手表示 + 注目レース一覧 対応版
 # =====================================================
 
@@ -1293,7 +1293,6 @@ def create_top_race_summary_by_full_analysis(
                 "最終評価": vr["grade"],
                 "最終スコア": vr["score"],
                 "評価理由": vr["reason"],
-                "StatScore": row_for_judge["StatScore"],
                 "適性一致数": row_for_judge["適性一致数"],
                 "不安材料数": row_for_judge["不安材料数"],
                 "地雷補正": "地雷ラップ：強制降格" if vr["grade"] == "降格" else "-",
@@ -1321,7 +1320,7 @@ def create_top_race_summary_by_full_analysis(
 # =====================================================
 
 st.set_page_config(
-    page_title="競馬分析アプリ Ver6",
+    page_title="競馬分析アプリ Ver6.1",
     layout="wide",
 )
 
@@ -1619,8 +1618,16 @@ if surface == "芝":
             st.warning("クッション値は 9.3 のような数値で入力してください。")
             cushion = None
 
-
-
+# Ver6.1: prevent stale analysis results after race-condition changes.
+current_condition_signature = (
+    surface,
+    place,
+    int(distance) if distance is not None else None,
+    race_no if "race_no" in globals() else None,
+    None if cushion is None else round(float(cushion), 3),
+    going,
+    sex,
+)
 
 # =====================================================
 # トップページ：相手候補以上レース一覧
@@ -1824,6 +1831,7 @@ if run:
     progress.empty()
 
     st.session_state["results"] = results
+    st.session_state["analysis_condition_signature"] = current_condition_signature
 
     st.success("分析が完了しました。")
 
@@ -1832,6 +1840,14 @@ if run:
 # 第5ブロック
 # 結果一覧作成
 # =====================================================
+
+# Ver6.1: 条件変更後に前回結果を残さない
+if (
+    "results" in st.session_state
+    and st.session_state.get("analysis_condition_signature") is not None
+    and st.session_state.get("analysis_condition_signature") != current_condition_signature
+):
+    st.session_state.pop("results", None)
 
 if "results" in st.session_state:
     st.subheader("分析結果")
@@ -1867,16 +1883,6 @@ if "results" in st.session_state:
 
     result_df["父"] = [
         r["sire"]
-        for r in results
-    ]
-
-    result_df["統計評価"] = [
-        r["grade"]
-        for r in results
-    ]
-
-    result_df["StatScore"] = [
-        r["total_score"]
         for r in results
     ]
 
@@ -2050,40 +2056,33 @@ if "results" in st.session_state:
     # -----------------------------
 
     if surface == "芝":
+        result_df["当日クッション値"] = [
+            "-" if cushion is None else float(cushion)
+            for _ in results
+        ]
         result_df["クッション"] = [safe_get_grade(r["father"].get("cushion")) for r in results]
         result_df["クッション幅"] = [
-            "-" if not r["father"].get("cushion") else f"±{r['father']['cushion'].get('width', '-') }"
+            "-" if not r["father"].get("cushion") or r["father"]["cushion"].get("width") is None
+            else f"±{float(r['father']['cushion'].get('width')):.1f}"
+            for r in results
+        ]
+        result_df["クッション母数"] = [
+            int((r["father"].get("cushion") or {}).get("stats", {}).get("sample", 0) or 0)
+            for r in results
+        ]
+        result_df["クッション信頼度"] = [
+            (r["father"].get("cushion") or {}).get("confidence_label", "評価不可")
             for r in results
         ]
         result_df["本人クッション"] = [r.get("own_cushion", {}).get("judgement", "評価なし") for r in results]
         result_df["本人クッション母数"] = [r.get("own_cushion", {}).get("sample", 0) for r in results]
+        result_df["本人クッション幅"] = [
+            "-" if r.get("own_cushion", {}).get("width") is None
+            else f"±{float(r.get('own_cushion', {}).get('width')):.1f}"
+            for r in results
+        ]
     else:
         result_df["馬場状態"] = [safe_get_grade(r["father"].get("going")) for r in results]
-
-    # -----------------------------
-    # Ver5: analyzerの連続StatScoreを使用
-    # -----------------------------
-    result_df["StatScore"] = pd.to_numeric(result_df["StatScore"], errors="coerce").fillna(0).round(3)
-
-    # -----------------------------
-    # 推奨度
-    # -----------------------------
-
-    recommend = []
-
-    for score in result_df["StatScore"]:
-        if score >= 4.0:
-            recommend.append("★★★★★")
-        elif score >= 2.5:
-            recommend.append("★★★★☆")
-        elif score >= 1.0:
-            recommend.append("★★★☆☆")
-        elif score >= 0.0:
-            recommend.append("★★☆☆☆")
-        else:
-            recommend.append("★☆☆☆☆")
-
-    result_df["推奨度"] = recommend
 
     # -----------------------------
     # 適性一致数・不安材料数
@@ -2103,15 +2102,12 @@ if "results" in st.session_state:
     # 最終判定
     # -----------------------------
 
-    legacy_results = []
     final_grades = []
     final_scores = []
     final_reasons = []
     jirai_memos = []
 
     for idx, row in result_df.iterrows():
-        legacy_judgement, legacy_memo = judge_final_result(row)
-        legacy_results.append(legacy_judgement)
         r = results[idx]
         rec = training_records[idx] if idx < len(training_records) else None
         vr = final_rating.calculate(r, rec, surface)
@@ -2120,7 +2116,6 @@ if "results" in st.session_state:
         final_reasons.append(vr["reason"])
         jirai_memos.append("地雷ラップ：強制降格" if vr["grade"] == "降格" else "-")
 
-    result_df["旧最終判定"] = legacy_results
     result_df["最終評価"] = final_grades
     result_df["最終スコア"] = final_scores
     result_df["評価理由"] = final_reasons
@@ -2148,6 +2143,12 @@ if "results" in st.session_state:
             prediction_history.save_predictions(history_df)
         except Exception as history_error:
             st.warning(f"予想履歴の保存に失敗しました: {history_error}")
+
+    # Ver6.1: 旧評価列は画面・履歴から除外
+    result_df = result_df.drop(
+        columns=["旧最終判定", "統計評価", "StatScore", "推奨度"],
+        errors="ignore",
+    )
 
     # -----------------------------
     # Ver6: S/A/B/C/降格 → 同ランク内は最終スコア順
@@ -2192,8 +2193,6 @@ if "results" in st.session_state:
         "最終評価",
         "最終スコア",
         "評価理由",
-        "旧最終判定",
-        "統計評価",
         "調教本命",
         "調教相手",
         "調教師判定",
@@ -2201,11 +2200,18 @@ if "results" in st.session_state:
         "地雷ラップ判定",
         "枠バイアス",
         "Lucky",
-        "StatScore",
         "適性効果",
         "父",
-        "推奨度",
         "地雷補正",
+        "当日クッション値",
+        "クッション",
+        "クッション幅",
+        "クッション母数",
+        "クッション信頼度",
+        "本人クッション",
+        "本人クッション母数",
+        "本人クッション幅",
+        "馬場状態",
         "調教コース判定",
         "ZI",
         "脚質",
@@ -2310,7 +2316,6 @@ if "results" in st.session_state:
     style_obj = result_df.style
 
     grade_cols = [
-        "統計評価",
         "競馬場×距離",
         "左右",
         "坂",
@@ -2335,23 +2340,8 @@ if "results" in st.session_state:
             subset=grade_cols,
         )
 
-    if "StatScore" in result_df.columns:
-        style_obj = style_obj.map(
-            color_total,
-            subset=["StatScore"],
-        )
-
-    if "推奨度" in result_df.columns:
-        style_obj = style_obj.map(
-            color_recommend,
-            subset=["推奨度"],
-        )
-
     if "最終評価" in result_df.columns:
         style_obj = style_obj.map(color_final_grade, subset=["最終評価"])
-
-    if "旧最終判定" in result_df.columns:
-        style_obj = style_obj.map(color_final_judgement, subset=["旧最終判定"])
 
     jirai_cols = [
         col for col in ["地雷ラップ判定", "地雷補正"]
@@ -2399,7 +2389,7 @@ if result_upload is not None:
         if not validation_df.empty:
             tab1, tab2, tab3 = st.tabs(["最終評価別", "適性項目別", "検証履歴"])
             with tab1:
-                st.dataframe(validation.summarize_by(validation_df, "最終評価" if "最終評価" in validation_df.columns else "旧最終判定"), use_container_width=True, hide_index=True)
+                st.dataframe(validation.summarize_by(validation_df, "最終評価"), use_container_width=True, hide_index=True)
             with tab2:
                 target_col = st.selectbox("検証項目", [c for c in ["競馬場×距離","左右","坂","コーナー","距離区分","枠適性","馬番適性","クッション","馬場状態","枠バイアス"] if c in validation_df.columns])
                 st.dataframe(validation.summarize_by(validation_df, target_col), use_container_width=True, hide_index=True)
