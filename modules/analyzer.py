@@ -10,7 +10,7 @@ from typing import Any, Callable
 import pandas as pd
 
 import config
-from modules import statistics, evaluation, bias
+from modules import statistics, evaluation, bias, cushion_analyzer
 from modules import filter as race_filter
 
 
@@ -171,6 +171,11 @@ class SireAnalyzer:
 
     def analyze_cushion(self, sire_name, cushion, sex=None):
         if cushion in [None, "", "未指定"]: return None
+        # Ver6: live numeric cushion, adaptive ±0.3 -> ±0.5 -> ±0.8
+        result = cushion_analyzer.analyze_sire_cushion(self.race_df, sire_name, cushion, sex)
+        if result is not None:
+            return result
+        # backward-compatible fallback for old grouped input
         return self._analyze_selector(sire_name, lambda d: race_filter.filter_cushion(d, cushion), sex, f"クッション:{cushion}")
 
     def analyze_going(self, sire_name, going, sex=None):
@@ -219,6 +224,7 @@ class SireAnalyzer:
         father["horse_no"] = self.analyze_horse_no(sire_name, horse_no, sex)
         father["cushion"] = self.analyze_cushion(sire_name, cushion, sex)
         father["going"] = self.analyze_going(sire_name, going, sex)
+        own_cushion = cushion_analyzer.analyze_horse_cushion(self.race_df, horse_name, cushion) if cushion not in [None, "", "未指定"] else {"judgement":"評価なし","sample":0,"width":None,"score":0.0,"formal":False}
         father["core_distance"] = self.analyze_core_distance(sire_name, sex)
 
         # Course shape supplement grows as exact-course confidence falls.
@@ -255,6 +261,7 @@ class SireAnalyzer:
         return {
             "horse_name": horse_name, "sire": sire_name, "sex": sex, "frame": frame, "horse_no": horse_no,
             "grade": overall_grade, "grade_text": evaluation.judge_text(overall_grade), "total_score": total,
+            "own_cushion": own_cushion,
             "father": father, "bias": bias_result, "stats": effect, "course": course_info,
             "aptitude_effect": {
                 "win_rate_diff": effect.get("win_rate_diff", 0.0),

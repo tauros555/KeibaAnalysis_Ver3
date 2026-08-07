@@ -23,7 +23,7 @@ MODULE_DIR = BASE_DIR / "modules"
 # アプリ名
 # ======================================================
 
-APP_NAME = "Sire Analyzer Ver5"
+APP_NAME = "Sire Analyzer Ver6"
 
 # ======================================================
 # CSVファイル

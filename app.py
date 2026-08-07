@@ -1,6 +1,6 @@
 # =====================================================
-# app.py Ver5.0
-# 調教判定CSV自動取得 + 手入力安全読込 + 注目レース一覧 対応版
+# app.py Ver6.0
+# 芝・ダート別最終評価 + 調教師/騎手表示 + 注目レース一覧 対応版
 # =====================================================
 
 import streamlit as st
@@ -13,7 +13,7 @@ import config
 
 from modules import loader
 from modules.analyzer import SireAnalyzer
-from modules import result_loader, result_transformer, prediction_history, validation
+from modules import result_loader, result_transformer, prediction_history, validation, final_rating
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -265,6 +265,18 @@ def normalize_training_df(training_df):
 
     if "相手候補判定" in df.columns:
         rename_dict["相手候補判定"] = "調教相手"
+
+    # 調教師・騎手
+    if "調教師" not in df.columns:
+        for c in ["調教師名", "Trainer"]:
+            if c in df.columns:
+                rename_dict[c] = "調教師"
+                break
+    if "騎手" not in df.columns:
+        for c in ["騎手名", "Jockey"]:
+            if c in df.columns:
+                rename_dict[c] = "騎手"
+                break
 
     # 枠番
     if "枠番" not in df.columns and "枠" in df.columns:
@@ -1259,9 +1271,9 @@ def create_top_race_summary_by_full_analysis(
             target_surface=target_surface,
         )
 
-        final_judgement, jirai_memo = judge_final_result(row_for_judge)
-
-        if not is_final_judgement_target(final_judgement):
+        # Ver6 final rating (S/A/B/C/降格). Top page shows B以上.
+        vr = final_rating.calculate(result, training_record, target_surface)
+        if vr["grade"] not in {"S", "A", "B"}:
             continue
 
         rows.append(
@@ -1273,14 +1285,18 @@ def create_top_race_summary_by_full_analysis(
                 "レース名": record.get("レース名", ""),
                 "馬番": horse_no if horse_no is not None else "-",
                 "馬名": record.get("馬名", ""),
+                "調教師": record.get("調教師", "-"),
+                "騎手": record.get("騎手", "-"),
                 "父": record.get("父", ""),
                 "調教本命": record.get("調教本命", "-"),
                 "調教相手": record.get("調教相手", "-"),
+                "最終評価": vr["grade"],
+                "最終スコア": vr["score"],
+                "評価理由": vr["reason"],
                 "StatScore": row_for_judge["StatScore"],
                 "適性一致数": row_for_judge["適性一致数"],
                 "不安材料数": row_for_judge["不安材料数"],
-                "最終判定": final_judgement,
-                "地雷補正": jirai_memo,
+                "地雷補正": "地雷ラップ：強制降格" if vr["grade"] == "降格" else "-",
                 "ZI": record.get("ZI", "-"),
                 "脚質": record.get("脚質", "-"),
             }
@@ -1291,10 +1307,12 @@ def create_top_race_summary_by_full_analysis(
 
     result_df = pd.DataFrame(rows)
 
+    rank_order = {"S":0, "A":1, "B":2, "C":3, "降格":4}
+    result_df["_評価順"] = result_df["最終評価"].map(rank_order).fillna(9)
     result_df = result_df.sort_values(
-        ["場所", "R", "StatScore"],
-        ascending=[True, True, False],
-    ).reset_index(drop=True)
+        ["場所", "R", "_評価順", "最終スコア"],
+        ascending=[True, True, True, False],
+    ).drop(columns=["_評価順"]).reset_index(drop=True)
 
     return result_df
 
@@ -1303,11 +1321,11 @@ def create_top_race_summary_by_full_analysis(
 # =====================================================
 
 st.set_page_config(
-    page_title="競馬分析アプリ Ver5",
+    page_title="競馬分析アプリ Ver6",
     layout="wide",
 )
 
-st.title("🏇 競馬分析アプリ Ver5")
+st.title("🏇 競馬分析アプリ Ver6")
 
 
 # =====================================================
@@ -1588,24 +1606,18 @@ if going == "未指定":
 cushion = None
 
 if surface == "芝":
-    cushion = st.selectbox(
-        "クッション値",
-        [
-            "未指定",
-            "8未満",
-            "8.0～8.5",
-            "8.6～9.0",
-            "9.1～9.5",
-            "9.6～10.0",
-            "10.1～10.5",
-            "10.6～11.0",
-            "11.1～11.5",
-            "11.6以上",
-        ],
+    cushion_text = st.text_input(
+        "当日クッション値",
+        value="",
+        placeholder="例：9.3",
+        help="Ver6は実数値を使い、±0.3 → ±0.5 → ±0.8の順で適応評価します。",
     )
-
-    if cushion == "未指定":
-        cushion = None
+    if str(cushion_text).strip() != "":
+        try:
+            cushion = float(cushion_text)
+        except ValueError:
+            st.warning("クッション値は 9.3 のような数値で入力してください。")
+            cushion = None
 
 
 
@@ -1618,7 +1630,7 @@ if training_df is not None:
     st.subheader("本日の注目レース")
 
     st.caption(
-        "調教判定で本命または相手の馬だけを対象に、血統・適性・バイアスまで分析し、相手候補以上の馬がいるレースを表示します。"
+        "調教判定で本命または相手の馬を対象に、Ver6最終評価でB以上の馬がいるレースを表示します。調教師・騎手も併記します。"
     )
 
     show_top_summary = st.checkbox(
@@ -1663,7 +1675,7 @@ if training_df is not None:
             )
         else:
             st.info(
-                "相手候補以上の馬がいるレースは見つかりませんでした。"
+                "Ver6最終評価でB以上の馬がいるレースは見つかりませんでした。"
             )
 
 # =====================================================
@@ -1951,6 +1963,16 @@ if "results" in st.session_state:
 
         training_records.append(record)
 
+    result_df["調教師"] = [
+        "-" if record is None else record.get("調教師", "-")
+        for record in training_records
+    ]
+
+    result_df["騎手"] = [
+        "-" if record is None else record.get("騎手", "-")
+        for record in training_records
+    ]
+
     result_df["調教本命"] = [
         "-"
         if record is None
@@ -2028,15 +2050,15 @@ if "results" in st.session_state:
     # -----------------------------
 
     if surface == "芝":
-        result_df["クッション"] = [
-            safe_get_grade(r["father"].get("cushion"))
+        result_df["クッション"] = [safe_get_grade(r["father"].get("cushion")) for r in results]
+        result_df["クッション幅"] = [
+            "-" if not r["father"].get("cushion") else f"±{r['father']['cushion'].get('width', '-') }"
             for r in results
         ]
+        result_df["本人クッション"] = [r.get("own_cushion", {}).get("judgement", "評価なし") for r in results]
+        result_df["本人クッション母数"] = [r.get("own_cushion", {}).get("sample", 0) for r in results]
     else:
-        result_df["馬場状態"] = [
-            safe_get_grade(r["father"].get("going"))
-            for r in results
-        ]
+        result_df["馬場状態"] = [safe_get_grade(r["father"].get("going")) for r in results]
 
     # -----------------------------
     # Ver5: analyzerの連続StatScoreを使用
@@ -2081,16 +2103,27 @@ if "results" in st.session_state:
     # 最終判定
     # -----------------------------
 
-    final_results = []
+    legacy_results = []
+    final_grades = []
+    final_scores = []
+    final_reasons = []
     jirai_memos = []
 
-    for _, row in result_df.iterrows():
-        final_judgement, jirai_memo = judge_final_result(row)
+    for idx, row in result_df.iterrows():
+        legacy_judgement, legacy_memo = judge_final_result(row)
+        legacy_results.append(legacy_judgement)
+        r = results[idx]
+        rec = training_records[idx] if idx < len(training_records) else None
+        vr = final_rating.calculate(r, rec, surface)
+        final_grades.append(vr["grade"])
+        final_scores.append(vr["score"])
+        final_reasons.append(vr["reason"])
+        jirai_memos.append("地雷ラップ：強制降格" if vr["grade"] == "降格" else "-")
 
-        final_results.append(final_judgement)
-        jirai_memos.append(jirai_memo)
-
-    result_df["最終判定"] = final_results
+    result_df["旧最終判定"] = legacy_results
+    result_df["最終評価"] = final_grades
+    result_df["最終スコア"] = final_scores
+    result_df["評価理由"] = final_reasons
     result_df["地雷補正"] = jirai_memos
 
     # -----------------------------
@@ -2117,13 +2150,13 @@ if "results" in st.session_state:
             st.warning(f"予想履歴の保存に失敗しました: {history_error}")
 
     # -----------------------------
-    # StatScore順ソート
+    # Ver6: S/A/B/C/降格 → 同ランク内は最終スコア順
     # -----------------------------
-
+    rank_order = {"S":0, "A":1, "B":2, "C":3, "降格":4}
+    result_df["_評価順"] = result_df["最終評価"].map(rank_order).fillna(9)
     result_df = result_df.sort_values(
-        "StatScore",
-        ascending=False,
-    ).reset_index(drop=True)
+        ["_評価順", "最終スコア"], ascending=[True, False]
+    ).drop(columns=["_評価順"]).reset_index(drop=True)
 
     # -----------------------------
     # 順位
@@ -2154,7 +2187,12 @@ if "results" in st.session_state:
         "馬番",
         "順位",
         "馬名",
-        "最終判定",
+        "調教師",
+        "騎手",
+        "最終評価",
+        "最終スコア",
+        "評価理由",
+        "旧最終判定",
         "統計評価",
         "調教本命",
         "調教相手",
@@ -2244,6 +2282,19 @@ if "results" in st.session_state:
 
         return ""
 
+    def color_final_grade(val):
+        if val == "S":
+            return "background-color:#FFD700;color:black;font-weight:bold"
+        if val == "A":
+            return "background-color:#4CAF50;color:white;font-weight:bold"
+        if val == "B":
+            return "background-color:#2196F3;color:white;font-weight:bold"
+        if val == "C":
+            return "background-color:#EEEEEE;color:black"
+        if val == "降格":
+            return "background-color:#F44336;color:white;font-weight:bold"
+        return ""
+
     def color_jirai(val):
         if has_jirai_lap(val):
             return "background-color:#F44336;color:white;font-weight:bold"
@@ -2296,11 +2347,11 @@ if "results" in st.session_state:
             subset=["推奨度"],
         )
 
-    if "最終判定" in result_df.columns:
-        style_obj = style_obj.map(
-            color_final_judgement,
-            subset=["最終判定"],
-        )
+    if "最終評価" in result_df.columns:
+        style_obj = style_obj.map(color_final_grade, subset=["最終評価"])
+
+    if "旧最終判定" in result_df.columns:
+        style_obj = style_obj.map(color_final_judgement, subset=["旧最終判定"])
 
     jirai_cols = [
         col for col in ["地雷ラップ判定", "地雷補正"]
@@ -2332,12 +2383,12 @@ if "results" in st.session_state:
 
 
 # =====================================================
-# Ver5 検証機能
+# Ver6 検証機能
 # =====================================================
 st.divider()
-st.header("Ver5 検証")
+st.header("Ver6 検証")
 st.caption("TARGETのヘッダーなし『オッズ成績データA』をそのままアップロードしてください。")
-result_upload = st.file_uploader("TARGET結果CSV", type=["csv"], key="ver5_result_upload")
+result_upload = st.file_uploader("TARGET結果CSV", type=["csv"], key="ver6_result_upload")
 if result_upload is not None:
     try:
         race_result_df = result_loader.load_target_result_csv(result_upload)
@@ -2346,9 +2397,9 @@ if result_upload is not None:
         validation_df = validation.create_validation_history(prediction_df, horse_result_df)
         st.success(f"{len(validation_df)}頭分の検証履歴を更新しました。")
         if not validation_df.empty:
-            tab1, tab2, tab3 = st.tabs(["最終判定別", "適性項目別", "検証履歴"])
+            tab1, tab2, tab3 = st.tabs(["最終評価別", "適性項目別", "検証履歴"])
             with tab1:
-                st.dataframe(validation.summarize_by(validation_df, "最終判定"), use_container_width=True, hide_index=True)
+                st.dataframe(validation.summarize_by(validation_df, "最終評価" if "最終評価" in validation_df.columns else "旧最終判定"), use_container_width=True, hide_index=True)
             with tab2:
                 target_col = st.selectbox("検証項目", [c for c in ["競馬場×距離","左右","坂","コーナー","距離区分","枠適性","馬番適性","クッション","馬場状態","枠バイアス"] if c in validation_df.columns])
                 st.dataframe(validation.summarize_by(validation_df, target_col), use_container_width=True, hide_index=True)

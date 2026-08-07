@@ -31,6 +31,14 @@ def read_csv(file_path: Path) -> pd.DataFrame:
         try:
             df = pd.read_csv(file_path, encoding=enc)
             df.columns = df.columns.str.strip()
+            # Ver6: master/header compatibility
+            rename = {}
+            if "芝ダ" in df.columns and "芝・ダ" not in df.columns:
+                rename["芝ダ"] = "芝・ダ"
+            if "父" in df.columns and "父馬名" not in df.columns:
+                rename["父"] = "父馬名"
+            if rename:
+                df = df.rename(columns=rename)
             return df
 
         except Exception as e:
