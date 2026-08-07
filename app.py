@@ -1,5 +1,5 @@
 # =====================================================
-# app.py Ver6.3
+# app.py Ver6.4
 # 芝・ダート別最終評価 + 調教師/騎手表示 + 注目レース一覧 対応版
 # =====================================================
 
@@ -1052,6 +1052,13 @@ def apply_live_cushion_override(result, race_df, cushion, target_surface):
     return result
 
 
+
+def color_top_final_grade(v):
+    """トップページ注目レース：S評価セルだけ黄色表示"""
+    if str(v).strip() == "S":
+        return "background-color: #fff59d; color: #000000; font-weight: bold;"
+    return ""
+
 # =====================================================
 # トップページ：注目レース一覧用関数
 # =====================================================
@@ -1369,12 +1376,12 @@ def create_top_race_summary_by_full_analysis(
 # =====================================================
 
 st.set_page_config(
-    page_title="競馬分析アプリ Ver6.3",
+    page_title="競馬分析アプリ Ver6.4",
     layout="wide",
 )
 
 st.title("🏇 競馬分析アプリ Ver6")
-st.caption("Ver6.3 クッション実数判定：app側で強制再計算")
+st.caption("Ver6.4 芝・ダート統合最終評価")
 
 
 # =====================================================
@@ -2191,7 +2198,11 @@ if "results" in st.session_state:
 
     # Ver6.1: 旧評価列は画面から除外
     result_df = result_df.drop(
-        columns=["旧最終判定", "統計評価", "StatScore", "推奨度"],
+        columns=[
+            "旧最終判定", "統計評価", "StatScore", "推奨度",
+            "クッション母数", "クッション信頼度",
+            "クッション判定範囲", "クッション方式",
+        ],
         errors="ignore",
     )
 
@@ -2251,10 +2262,6 @@ if "results" in st.session_state:
         "当日クッション値",
         "父馬クッション適性",
         "クッション幅",
-        "クッション母数",
-        "クッション信頼度",
-        "クッション判定範囲",
-        "クッション方式",
         "本人クッション",
         "本人クッション母数",
         "本人クッション幅",
