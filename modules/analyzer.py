@@ -273,7 +273,13 @@ class SireAnalyzer:
                 "course_distance": round(course_group_score, 4), "surface": round(market_score, 4),
                 "frame": round(frame_score, 4), "bias": round(bias_score, 4),
             },
-            "debug": {"course_id": course_id, "course_info": course_info},
+            "debug": {
+                "course_id": course_id,
+                "course_info": course_info,
+                "cushion_input": cushion,
+                "cushion_grade": (father.get("cushion") or {}).get("grade", "-"),
+                "cushion_scope": (father.get("cushion") or {}).get("stats", {}).get("selected_scope", "-"),
+            },
         }
 
     # Compatibility helpers

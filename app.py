@@ -1,5 +1,5 @@
 # =====================================================
-# app.py Ver6.1
+# app.py Ver6.2
 # 芝・ダート別最終評価 + 調教師/騎手表示 + 注目レース一覧 対応版
 # =====================================================
 
@@ -1320,11 +1320,12 @@ def create_top_race_summary_by_full_analysis(
 # =====================================================
 
 st.set_page_config(
-    page_title="競馬分析アプリ Ver6.1",
+    page_title="競馬分析アプリ Ver6.2",
     layout="wide",
 )
 
 st.title("🏇 競馬分析アプリ Ver6")
+st.caption("Ver6.2 クッション実数判定：±0.3 → ±0.5 → ±0.8")
 
 
 # =====================================================
@@ -2060,7 +2061,9 @@ if "results" in st.session_state:
             "-" if cushion is None else float(cushion)
             for _ in results
         ]
-        result_df["クッション"] = [safe_get_grade(r["father"].get("cushion")) for r in results]
+        result_df["父馬クッション適性"] = [
+            safe_get_grade(r["father"].get("cushion")) for r in results
+        ]
         result_df["クッション幅"] = [
             "-" if not r["father"].get("cushion") or r["father"]["cushion"].get("width") is None
             else f"±{float(r['father']['cushion'].get('width')):.1f}"
@@ -2072,6 +2075,10 @@ if "results" in st.session_state:
         ]
         result_df["クッション信頼度"] = [
             (r["father"].get("cushion") or {}).get("confidence_label", "評価不可")
+            for r in results
+        ]
+        result_df["クッション判定範囲"] = [
+            (r["father"].get("cushion") or {}).get("stats", {}).get("selected_scope", "-")
             for r in results
         ]
         result_df["本人クッション"] = [r.get("own_cushion", {}).get("judgement", "評価なし") for r in results]
@@ -2204,10 +2211,11 @@ if "results" in st.session_state:
         "父",
         "地雷補正",
         "当日クッション値",
-        "クッション",
+        "父馬クッション適性",
         "クッション幅",
         "クッション母数",
         "クッション信頼度",
+        "クッション判定範囲",
         "本人クッション",
         "本人クッション母数",
         "本人クッション幅",
@@ -2325,7 +2333,7 @@ if "results" in st.session_state:
         "距離区分",
         "枠バイアス",
         "Lucky",
-        "クッション",
+        "父馬クッション適性",
         "馬場状態",
     ]
 

@@ -1,0 +1,23 @@
+{
+  "7.9": {
+    "grade": "×",
+    "width": 0.3,
+    "sample": 277,
+    "scope": "クッション7.9±0.3",
+    "method": null
+  },
+  "9.0": {
+    "grade": "○",
+    "width": 0.3,
+    "sample": 1641,
+    "scope": "クッション9.0±0.3",
+    "method": null
+  },
+  "9.3": {
+    "grade": "△",
+    "width": 0.3,
+    "sample": 2045,
+    "scope": "クッション9.3±0.3",
+    "method": null
+  }
+}

@@ -68,6 +68,7 @@ def analyze_sire_cushion(race_df, sire_name, cushion, sex=None):
         "width": chosen,
         "value": value,
         "confidence_label": "通常" if chosen == 0.3 else ("補完" if chosen == 0.5 else "低信頼度参考"),
+        "method": "実数±幅方式",
     }
 
 
