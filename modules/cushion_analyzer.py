@@ -22,20 +22,20 @@ def analyze_sire_cushion(race_df, sire_name, cushion, sex=None):
         return {
             "stats": {"sample": 0, "selected_scope": "数値クッション値なし"},
             "grade": "-", "grade_text": "データ不足", "stat_score": 0.0,
-            "width": None, "value": value, "confidence_label": "評価不可",
+            "width": None, "value": value, "confidence_label": "評価不可", "method": "実数±幅方式",
         }
     if config.COL_SIRE not in race_df.columns or config.COL_CUSHION not in race_df.columns:
         return {
             "stats": {"sample": 0, "selected_scope": "クッション値列なし"},
             "grade": "-", "grade_text": "データ不足", "stat_score": 0.0,
-            "width": None, "value": value, "confidence_label": "評価不可",
+            "width": None, "value": value, "confidence_label": "評価不可", "method": "実数±幅方式",
         }
     sire = race_df[race_df[config.COL_SIRE].astype(str).str.strip() == str(sire_name).strip()].copy()
     if sire.empty:
         return {
             "stats": {"sample": 0, "selected_scope": "父馬データなし"},
             "grade": "-", "grade_text": "データ不足", "stat_score": 0.0,
-            "width": None, "value": value, "confidence_label": "評価不可",
+            "width": None, "value": value, "confidence_label": "評価不可", "method": "実数±幅方式",
         }
     sire[config.COL_CUSHION] = pd.to_numeric(sire[config.COL_CUSHION], errors="coerce")
     sire = sire[sire[config.COL_CUSHION].notna()].copy()
@@ -43,7 +43,7 @@ def analyze_sire_cushion(race_df, sire_name, cushion, sex=None):
         return {
             "stats": {"sample": 0, "selected_scope": "過去クッション実数なし"},
             "grade": "-", "grade_text": "データ不足", "stat_score": 0.0,
-            "width": None, "value": value, "confidence_label": "評価不可",
+            "width": None, "value": value, "confidence_label": "評価不可", "method": "実数±幅方式",
         }
     widths = [0.3, 0.5, 0.8]
     chosen = 0.8

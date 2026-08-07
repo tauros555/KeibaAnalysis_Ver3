@@ -1,5 +1,5 @@
 # =====================================================
-# app.py Ver6.2
+# app.py Ver6.3
 # 芝・ダート別最終評価 + 調教師/騎手表示 + 注目レース一覧 対応版
 # =====================================================
 
@@ -13,7 +13,7 @@ import config
 
 from modules import loader
 from modules.analyzer import SireAnalyzer
-from modules import result_loader, result_transformer, prediction_history, validation, final_rating
+from modules import final_rating, cushion_analyzer
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -1010,6 +1010,48 @@ def safe_get_grade(value):
 
 
 
+
+def apply_live_cushion_override(result, race_df, cushion, target_surface):
+    """
+    Ver6.3:
+    analyzer.py のバージョン差に影響されないよう、
+    芝のクッション適性を app.py 側で必ず実数方式で再計算して上書きする。
+    """
+    if result is None or target_surface != "芝":
+        return result
+
+    if cushion in [None, "", "未指定"]:
+        return result
+
+    sire_name = result.get("sire", "")
+    horse_name = result.get("horse_name", "")
+    sex = result.get("sex", None)
+
+    sire_cushion = cushion_analyzer.analyze_sire_cushion(
+        race_df=race_df,
+        sire_name=sire_name,
+        cushion=cushion,
+        sex=sex,
+    )
+    own_cushion = cushion_analyzer.analyze_horse_cushion(
+        race_df=race_df,
+        horse_name=horse_name,
+        cushion=cushion,
+    )
+
+    result.setdefault("father", {})
+    result["father"]["cushion"] = sire_cushion
+    result["own_cushion"] = own_cushion
+
+    result.setdefault("debug", {})
+    result["debug"]["cushion_input"] = cushion
+    result["debug"]["cushion_grade"] = sire_cushion.get("grade", "-")
+    result["debug"]["cushion_scope"] = sire_cushion.get("stats", {}).get("selected_scope", "-")
+    result["debug"]["cushion_method"] = "app強制再計算・実数±幅方式"
+
+    return result
+
+
 # =====================================================
 # トップページ：注目レース一覧用関数
 # =====================================================
@@ -1263,6 +1305,13 @@ def create_top_race_summary_by_full_analysis(
         if result is None:
             continue
 
+        result = apply_live_cushion_override(
+            result=result,
+            race_df=analyzer.race_df,
+            cushion=cushion,
+            target_surface=target_surface,
+        )
+
         training_record = record.to_dict()
 
         row_for_judge = build_judgement_row_from_result(
@@ -1320,12 +1369,12 @@ def create_top_race_summary_by_full_analysis(
 # =====================================================
 
 st.set_page_config(
-    page_title="競馬分析アプリ Ver6.2",
+    page_title="競馬分析アプリ Ver6.3",
     layout="wide",
 )
 
 st.title("🏇 競馬分析アプリ Ver6")
-st.caption("Ver6.2 クッション実数判定：±0.3 → ±0.5 → ±0.8")
+st.caption("Ver6.3 クッション実数判定：app側で強制再計算")
 
 
 # =====================================================
@@ -1821,6 +1870,12 @@ if run:
         )
 
         if result is not None:
+            result = apply_live_cushion_override(
+                result=result,
+                race_df=analyzer.race_df,
+                cushion=cushion,
+                target_surface=surface,
+            )
             results.append(result)
         else:
             st.warning(
@@ -2081,6 +2136,10 @@ if "results" in st.session_state:
             (r["father"].get("cushion") or {}).get("stats", {}).get("selected_scope", "-")
             for r in results
         ]
+        result_df["クッション方式"] = [
+            (r["father"].get("cushion") or {}).get("method", "実数±幅方式")
+            for r in results
+        ]
         result_df["本人クッション"] = [r.get("own_cushion", {}).get("judgement", "評価なし") for r in results]
         result_df["本人クッション母数"] = [r.get("own_cushion", {}).get("sample", 0) for r in results]
         result_df["本人クッション幅"] = [
@@ -2128,30 +2187,9 @@ if "results" in st.session_state:
     result_df["評価理由"] = final_reasons
     result_df["地雷補正"] = jirai_memos
 
-    # -----------------------------
-    # Ver5: 予想履歴を自動保存
-    # -----------------------------
-    history_df = result_df.copy()
-    history_df["場所"] = place
-    history_df["R"] = race_no if "race_no" in globals() else ""
-    history_df["芝・ダ"] = surface
-    history_df["距離"] = distance
-    history_df["レースID"] = [
-        "" if rec is None else rec.get("レースID", "") for rec in training_records
-    ]
-    history_df["血統登録番号"] = [
-        "" if rec is None else rec.get("血統登録番号", "") for rec in training_records
-    ]
-    history_df["年月日"] = [
-        "" if rec is None else rec.get("年月日", "") for rec in training_records
-    ]
-    if history_df["レースID"].astype(str).str.strip().ne("").any():
-        try:
-            prediction_history.save_predictions(history_df)
-        except Exception as history_error:
-            st.warning(f"予想履歴の保存に失敗しました: {history_error}")
+    # Ver6.3: 予想履歴・検証機能は廃止
 
-    # Ver6.1: 旧評価列は画面・履歴から除外
+    # Ver6.1: 旧評価列は画面から除外
     result_df = result_df.drop(
         columns=["旧最終判定", "統計評価", "StatScore", "推奨度"],
         errors="ignore",
@@ -2216,6 +2254,7 @@ if "results" in st.session_state:
         "クッション母数",
         "クッション信頼度",
         "クッション判定範囲",
+        "クッション方式",
         "本人クッション",
         "本人クッション母数",
         "本人クッション幅",
@@ -2378,32 +2417,3 @@ if "results" in st.session_state:
         use_container_width=True,
         hide_index=True,
     )
-
-
-# =====================================================
-# Ver6 検証機能
-# =====================================================
-st.divider()
-st.header("Ver6 検証")
-st.caption("TARGETのヘッダーなし『オッズ成績データA』をそのままアップロードしてください。")
-result_upload = st.file_uploader("TARGET結果CSV", type=["csv"], key="ver6_result_upload")
-if result_upload is not None:
-    try:
-        race_result_df = result_loader.load_target_result_csv(result_upload)
-        horse_result_df = result_transformer.transform_results(race_result_df)
-        prediction_df = prediction_history.load_predictions()
-        validation_df = validation.create_validation_history(prediction_df, horse_result_df)
-        st.success(f"{len(validation_df)}頭分の検証履歴を更新しました。")
-        if not validation_df.empty:
-            tab1, tab2, tab3 = st.tabs(["最終評価別", "適性項目別", "検証履歴"])
-            with tab1:
-                st.dataframe(validation.summarize_by(validation_df, "最終評価"), use_container_width=True, hide_index=True)
-            with tab2:
-                target_col = st.selectbox("検証項目", [c for c in ["競馬場×距離","左右","坂","コーナー","距離区分","枠適性","馬番適性","クッション","馬場状態","枠バイアス"] if c in validation_df.columns])
-                st.dataframe(validation.summarize_by(validation_df, target_col), use_container_width=True, hide_index=True)
-            with tab3:
-                st.dataframe(validation_df, use_container_width=True, hide_index=True)
-                st.download_button("検証履歴CSVをダウンロード", validation_df.to_csv(index=False).encode("utf-8-sig"), "validation_history.csv", "text/csv")
-    except Exception as validation_error:
-        st.error(f"結果CSVの検証処理でエラーが発生しました: {validation_error}")
-
