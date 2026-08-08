@@ -1,5 +1,5 @@
 # =====================================================
-# app.py Ver6.4
+# app.py Ver6.6
 # 芝・ダート別最終評価 + 調教師/騎手表示 + 注目レース一覧 対応版
 # =====================================================
 
@@ -1053,11 +1053,91 @@ def apply_live_cushion_override(result, race_df, cushion, target_surface):
 
 
 
+
+def color_score_star(v):
+    text = str(v).strip()
+    if text == "★★★":
+        return "background-color: #ffd54f; color: #000000; font-weight: bold; text-align: center;"
+    if text == "★★":
+        return "background-color: #fff3cd; color: #000000; font-weight: bold; text-align: center;"
+    return ""
+
+
+def color_value_condition(v):
+    text = str(v).strip()
+    if "★★★" in text:
+        return "background-color: #ffe0b2; color: #000000; font-weight: bold;"
+    if "★★" in text:
+        return "background-color: #fff3e0; color: #000000;"
+    return ""
+
+
+def top_row_horse_style(row):
+    styles = [""] * len(row)
+    if str(row.get("★", "")).strip() in {"★★", "★★★"} and "馬名" in row.index:
+        styles[row.index.get_loc("馬名")] = (
+            "background-color: #ffcc80; color: #000000; font-weight: bold;"
+        )
+    return styles
+
+
 def color_top_final_grade(v):
     """トップページ注目レース：S評価セルだけ黄色表示"""
     if str(v).strip() == "S":
         return "background-color: #fff59d; color: #000000; font-weight: bold;"
     return ""
+
+
+def score_star(surface, score):
+    """
+    妙味スコア表示。
+    オッズは自動取得しないため、★は最終スコアだけで表示。
+    実際の単勝オッズ条件は「妙味条件」で手動確認する。
+    """
+    try:
+        v = float(score)
+    except Exception:
+        return ""
+
+    if surface == "ダート":
+        if v >= 8.0:
+            return "★★★"
+        if v >= 7.5:
+            return "★★"
+        return ""
+
+    if surface == "芝":
+        if v >= 8.5:
+            return "★★★"
+        if v >= 8.25:
+            return "★★"
+        return ""
+
+    return ""
+
+
+def value_condition(surface, score):
+    try:
+        v = float(score)
+    except Exception:
+        return "-"
+
+    if surface == "ダート":
+        if v >= 8.0:
+            return "安定妙味★★★：単勝10〜20倍"
+        if v >= 7.5:
+            return "安定妙味★★：単勝10〜20倍"
+        return "-"
+
+    if surface == "芝":
+        if v >= 8.5:
+            return "強い妙味★★★：単勝20〜50倍"
+        if v >= 8.25:
+            return "妙味★★：単勝10〜20倍"
+        return "-"
+
+    return "-"
+
 
 # =====================================================
 # トップページ：注目レース一覧用関数
@@ -1348,6 +1428,8 @@ def create_top_race_summary_by_full_analysis(
                 "調教相手": record.get("調教相手", "-"),
                 "最終評価": vr["grade"],
                 "最終スコア": vr["score"],
+                "★": score_star(target_surface, vr["score"]),
+                "妙味条件": value_condition(target_surface, vr["score"]),
                 "評価理由": vr["reason"],
                 "適性一致数": row_for_judge["適性一致数"],
                 "不安材料数": row_for_judge["不安材料数"],
@@ -1376,12 +1458,12 @@ def create_top_race_summary_by_full_analysis(
 # =====================================================
 
 st.set_page_config(
-    page_title="競馬分析アプリ Ver6.4",
+    page_title="競馬分析アプリ Ver6.6",
     layout="wide",
 )
 
 st.title("🏇 競馬分析アプリ Ver6")
-st.caption("Ver6.4 芝・ダート統合最終評価")
+st.caption("Ver6.6 芝・ダート統合最終評価＋妙味スコア表示")
 
 
 # =====================================================
@@ -2191,6 +2273,8 @@ if "results" in st.session_state:
 
     result_df["最終評価"] = final_grades
     result_df["最終スコア"] = final_scores
+    result_df["★"] = [score_star(surface, v) for v in final_scores]
+    result_df["妙味条件"] = [value_condition(surface, v) for v in final_scores]
     result_df["評価理由"] = final_reasons
     result_df["地雷補正"] = jirai_memos
 
@@ -2248,6 +2332,8 @@ if "results" in st.session_state:
         "騎手",
         "最終評価",
         "最終スコア",
+        "★",
+        "妙味条件",
         "評価理由",
         "調教本命",
         "調教相手",
@@ -2396,6 +2482,12 @@ if "results" in st.session_state:
 
     if "最終評価" in result_df.columns:
         style_obj = style_obj.map(color_final_grade, subset=["最終評価"])
+
+    if "★" in result_df.columns:
+        style_obj = style_obj.map(color_score_star, subset=["★"])
+
+    if "妙味条件" in result_df.columns:
+        style_obj = style_obj.map(color_value_condition, subset=["妙味条件"])
 
     jirai_cols = [
         col for col in ["地雷ラップ判定", "地雷補正"]
