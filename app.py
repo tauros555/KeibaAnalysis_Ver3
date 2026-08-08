@@ -1,5 +1,5 @@
 # =====================================================
-# app.py Ver6.6
+# app.py Ver6.7
 # 芝・ダート別最終評価 + 調教師/騎手表示 + 注目レース一覧 対応版
 # =====================================================
 
@@ -1088,12 +1088,22 @@ def color_top_final_grade(v):
     return ""
 
 
+def normalize_surface_label(surface):
+    text = "" if surface is None else str(surface).strip()
+    if text in {"ダ", "ダート", "D", "dirt", "Dirt"}:
+        return "ダート"
+    if text in {"芝", "T", "turf", "Turf"}:
+        return "芝"
+    return text
+
+
 def score_star(surface, score):
     """
     妙味スコア表示。
-    オッズは自動取得しないため、★は最終スコアだけで表示。
-    実際の単勝オッズ条件は「妙味条件」で手動確認する。
+    表面名は ダ/ダート、芝 などの表記ゆれを吸収する。
     """
+    surface = normalize_surface_label(surface)
+
     try:
         v = float(score)
     except Exception:
@@ -1117,10 +1127,29 @@ def score_star(surface, score):
 
 
 def value_condition(surface, score):
+    surface = normalize_surface_label(surface)
+
     try:
         v = float(score)
     except Exception:
         return "-"
+
+    if surface == "ダート":
+        if v >= 8.0:
+            return "安定妙味★★★：単勝10〜20倍"
+        if v >= 7.5:
+            return "安定妙味★★：単勝10〜20倍"
+        return "-"
+
+    if surface == "芝":
+        if v >= 8.5:
+            return "強い妙味★★★：単勝20〜50倍"
+        if v >= 8.25:
+            return "妙味★★：単勝10〜20倍"
+        return "-"
+
+    return "-"
+
 
     if surface == "ダート":
         if v >= 8.0:
@@ -1458,12 +1487,12 @@ def create_top_race_summary_by_full_analysis(
 # =====================================================
 
 st.set_page_config(
-    page_title="競馬分析アプリ Ver6.6",
+    page_title="競馬分析アプリ Ver6.7",
     layout="wide",
 )
 
 st.title("🏇 競馬分析アプリ Ver6")
-st.caption("Ver6.6 芝・ダート統合最終評価＋妙味スコア表示")
+st.caption("Ver6.7 妙味スコア表面判定修正版")
 
 
 # =====================================================
@@ -2273,6 +2302,7 @@ if "results" in st.session_state:
 
     result_df["最終評価"] = final_grades
     result_df["最終スコア"] = final_scores
+    result_df["表面確認"] = [normalize_surface_label(surface) for _ in final_scores]
     result_df["★"] = [score_star(surface, v) for v in final_scores]
     result_df["妙味条件"] = [value_condition(surface, v) for v in final_scores]
     result_df["評価理由"] = final_reasons
