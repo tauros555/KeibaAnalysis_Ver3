@@ -1,5 +1,5 @@
 # =====================================================
-# app.py Ver6.7
+# app.py Ver6.8
 # 芝・ダート別最終評価 + 調教師/騎手表示 + 注目レース一覧 対応版
 # =====================================================
 
@@ -13,7 +13,7 @@ import config
 
 from modules import loader
 from modules.analyzer import SireAnalyzer
-from modules import final_rating, cushion_analyzer
+from modules import final_rating, cushion_analyzer, jockey_reference
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -1487,12 +1487,12 @@ def create_top_race_summary_by_full_analysis(
 # =====================================================
 
 st.set_page_config(
-    page_title="競馬分析アプリ Ver6.7",
+    page_title="競馬分析アプリ Ver6.8",
     layout="wide",
 )
 
 st.title("🏇 競馬分析アプリ Ver6")
-st.caption("Ver6.7 妙味スコア表面判定修正版")
+st.caption("Ver6.8 妙味スコア表面判定修正版")
 
 
 # =====================================================
@@ -2306,6 +2306,29 @@ if "results" in st.session_state:
     result_df["★"] = [score_star(surface, v) for v in final_scores]
     result_df["妙味条件"] = [value_condition(surface, v) for v in final_scores]
     result_df["評価理由"] = final_reasons
+
+    # -----------------------------
+    # Ver6.8: 騎手参考情報（最終スコアには加減点しない）
+    # -----------------------------
+    result_df["騎手条件"] = [
+        jockey_reference.evaluate_jockey_condition(
+            place=place,
+            surface=surface,
+            distance=distance,
+            jockey=("-" if rec is None else rec.get("騎手", "-")),
+        )
+        for rec in training_records
+    ]
+
+    result_df["父馬×騎手相性"] = [
+        jockey_reference.evaluate_sire_jockey(
+            surface=surface,
+            sire=r.get("sire", ""),
+            jockey=("-" if rec is None else rec.get("騎手", "-")),
+        )
+        for r, rec in zip(results, training_records)
+    ]
+
     result_df["地雷補正"] = jirai_memos
 
     # Ver6.3: 予想履歴・検証機能は廃止
@@ -2365,6 +2388,8 @@ if "results" in st.session_state:
         "★",
         "妙味条件",
         "評価理由",
+        "騎手条件",
+        "父馬×騎手相性",
         "調教本命",
         "調教相手",
         "調教師判定",
@@ -2497,6 +2522,8 @@ if "results" in st.session_state:
         "Lucky",
         "父馬クッション適性",
         "馬場状態",
+        "騎手条件",
+        "父馬×騎手相性",
     ]
 
     grade_cols = [
