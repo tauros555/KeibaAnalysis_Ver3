@@ -2308,6 +2308,22 @@ if "results" in st.session_state:
     result_df["評価理由"] = final_reasons
 
     # -----------------------------
+    # Ver6.9: 前日坂路時計（調教判定表の表示値をそのまま参照）
+    # 評価・最終スコアには使用しない。
+    # -----------------------------
+    result_df["前日坂路時計"] = [
+        "-"
+        if rec is None
+        else (
+            "-"
+            if pd.isna(rec.get("前日坂路時計", None))
+            or str(rec.get("前日坂路時計", "")).strip() in {"", "nan", "None"}
+            else rec.get("前日坂路時計")
+        )
+        for rec in training_records
+    ]
+
+    # -----------------------------
     # Ver6.8: 騎手参考情報（最終スコアには加減点しない）
     # -----------------------------
     result_df["騎手条件"] = [
@@ -2320,7 +2336,7 @@ if "results" in st.session_state:
         for rec in training_records
     ]
 
-    result_df["父馬×騎手相性"] = [
+    result_df["父×騎手相性"] = [
         jockey_reference.evaluate_sire_jockey(
             surface=surface,
             sire=r.get("sire", ""),
@@ -2388,8 +2404,7 @@ if "results" in st.session_state:
         "★",
         "妙味条件",
         "評価理由",
-        "騎手条件",
-        "父馬×騎手相性",
+        "前日坂路時計",
         "調教本命",
         "調教相手",
         "調教師判定",
@@ -2399,6 +2414,8 @@ if "results" in st.session_state:
         "Lucky",
         "適性効果",
         "父",
+        "騎手条件",
+        "父×騎手相性",
         "地雷補正",
         "当日クッション値",
         "父馬クッション適性",
@@ -2523,7 +2540,7 @@ if "results" in st.session_state:
         "父馬クッション適性",
         "馬場状態",
         "騎手条件",
-        "父馬×騎手相性",
+        "父×騎手相性",
     ]
 
     grade_cols = [
