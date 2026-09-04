@@ -1206,7 +1206,8 @@ def add_zi_partner_columns(df):
         top_mask = zi.eq(top)
         if gap is not None:
             gap_disp = int(gap) if float(gap).is_integer() else round(gap, 1)
-            out.loc[top_mask, "ZI差"] = gap_disp
+            out["ZI差"] = pd.Series(["-"] * len(out), index=out.index, dtype="object")
+            out.loc[top_mask, "ZI差"] = str(gap_disp)
         mark = "○"
         if gap is not None and gap >= 10:
             mark = "◎◎"
