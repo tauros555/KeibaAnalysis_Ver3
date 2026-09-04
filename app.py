@@ -282,6 +282,23 @@ def normalize_training_df(training_df):
     if "枠番" not in df.columns and "枠" in df.columns:
         rename_dict["枠"] = "枠番"
 
+    # Ver7.0: 調教判定表から開催場・レース番号・表面を自動認識
+    if "場所" not in df.columns:
+        for c in ["競馬場", "開催場", "場名"]:
+            if c in df.columns:
+                rename_dict[c] = "場所"
+                break
+    if "R" not in df.columns:
+        for c in ["レース番号", "R番号", "レース"]:
+            if c in df.columns:
+                rename_dict[c] = "R"
+                break
+    if "芝・ダ" not in df.columns:
+        for c in ["芝ダ", "芝ダート", "馬場種別", "表面"]:
+            if c in df.columns:
+                rename_dict[c] = "芝・ダ"
+                break
+
     df = df.rename(columns=rename_dict)
 
     # rename後にも重複があれば再度一意化
@@ -1169,6 +1186,37 @@ def value_condition(surface, score):
 
 
 # =====================================================
+# Ver7.0: ZI（独立した相手候補軸。最終スコアには加点しない）
+# =====================================================
+
+def add_zi_partner_columns(df):
+    out = df.copy()
+    if "ZI" not in out.columns:
+        out["ZI"] = "-"
+    zi = pd.to_numeric(out["ZI"], errors="coerce")
+    zi = zi.where(zi > 0)  # ZI=0 は未取得扱い
+    out["ZI"] = ["-" if pd.isna(v) else int(v) if float(v).is_integer() else float(v) for v in zi]
+    out["ZI順位"] = zi.rank(method="min", ascending=False).astype("Int64")
+    valid = zi.dropna().sort_values(ascending=False)
+    gap = float(valid.iloc[0] - valid.iloc[1]) if len(valid) >= 2 else None
+    out["ZI差"] = "-"
+    out["ZI相手判定"] = "-"
+    if len(valid) > 0:
+        top = valid.iloc[0]
+        top_mask = zi.eq(top)
+        if gap is not None:
+            gap_disp = int(gap) if float(gap).is_integer() else round(gap, 1)
+            out.loc[top_mask, "ZI差"] = gap_disp
+        mark = "○"
+        if gap is not None and gap >= 10:
+            mark = "◎◎"
+        elif gap is not None and gap >= 5:
+            mark = "◎"
+        out.loc[top_mask, "ZI相手判定"] = mark
+    out["ZI順位"] = out["ZI順位"].astype(object).where(out["ZI順位"].notna(), "-")
+    return out
+
+# =====================================================
 # トップページ：注目レース一覧用関数
 # =====================================================
 
@@ -1297,6 +1345,8 @@ def create_top_race_summary_by_full_analysis(
     place_list=None,
     cushion=None,
     going=None,
+    cushion_map=None,
+    going_map=None,
 ):
     """
     調教判定CSVをもとに全レースを分析し、
@@ -1405,6 +1455,9 @@ def create_top_race_summary_by_full_analysis(
         frame = to_int_or_none(record.get("枠番", None))
         horse_no = to_int_or_none(record.get("馬番", None))
 
+        live_cushion = (cushion_map or {}).get(place, cushion) if target_surface == "芝" else None
+        live_going = (going_map or {}).get(place, going) if target_surface != "芝" else None
+
         result = analyzer.analyze_all(
             horse_name=record.get("馬名", ""),
             sire_name=record.get("父", ""),
@@ -1414,8 +1467,8 @@ def create_top_race_summary_by_full_analysis(
             course_id=course_id,
             place=place,
             distance=int(distance),
-            cushion=cushion,
-            going=going,
+            cushion=live_cushion,
+            going=live_going,
         )
 
         if result is None:
@@ -1424,7 +1477,7 @@ def create_top_race_summary_by_full_analysis(
         result = apply_live_cushion_override(
             result=result,
             race_df=analyzer.race_df,
-            cushion=cushion,
+            cushion=live_cushion,
             target_surface=target_surface,
         )
 
@@ -1436,9 +1489,9 @@ def create_top_race_summary_by_full_analysis(
             target_surface=target_surface,
         )
 
-        # Ver6 final rating (S/A/B/C/降格). Top page shows B以上.
+        # Ver7.0: 中央の注目レースは最終評価Sのみ
         vr = final_rating.calculate(result, training_record, target_surface)
-        if vr["grade"] not in {"S", "A", "B"}:
+        if vr["grade"] != "S":
             continue
 
         rows.append(
@@ -1472,6 +1525,7 @@ def create_top_race_summary_by_full_analysis(
         return pd.DataFrame()
 
     result_df = pd.DataFrame(rows)
+    # S馬の行にも同一レース内ZI相手情報を付与（元の全頭ZI順位は詳細表で確認）
 
     rank_order = {"S":0, "A":1, "B":2, "C":3, "降格":4}
     result_df["_評価順"] = result_df["最終評価"].map(rank_order).fillna(9)
@@ -1487,12 +1541,21 @@ def create_top_race_summary_by_full_analysis(
 # =====================================================
 
 st.set_page_config(
-    page_title="競馬分析アプリ Ver6.8",
+    page_title="Runaway's | Race Analysis System",
     layout="wide",
 )
 
-st.title("🏇 競馬分析アプリ Ver6")
-st.caption("Ver6.8 妙味スコア表面判定修正版")
+st.markdown("# 🏇 Runaway's")
+st.caption("Race Analysis System — Ver7.0")
+st.markdown("---")
+st.markdown("""
+<style>
+.block-container {padding-top: 1.5rem; max-width: 1500px;}
+div[data-testid="stMetric"] {border:1px solid rgba(128,128,128,.25); border-radius:12px; padding:10px;}
+[data-testid="stDataFrame"] {border-radius:12px; overflow:hidden;}
+h3 {margin-top: .7rem;}
+</style>
+""", unsafe_allow_html=True)
 
 
 # =====================================================
@@ -1628,163 +1691,83 @@ if training_df is not None:
 
 
 # =====================================================
-# 第2ブロック
-# 分析条件入力
+# 第2ブロック / Ver7.0 Runaway's 当日ダッシュボード
 # =====================================================
 
-surface = st.radio(
-    "馬場",
-    ["芝", "ダート"],
-    horizontal=True,
-)
+st.subheader("TRACK CONDITION")
 
-if surface == "芝":
-    race_df = data["turf"]
-    lucky_df = data["turf_lucky"]
-else:
-    race_df = data["dirt"]
-    lucky_df = data["dirt_lucky"]
+# 開催場・距離・表面・Rは調教判定表から自動検出。手入力時のみ従来方式へフォールバック。
+if training_df is not None and all(c in training_df.columns for c in ["場所", "R", "芝・ダ", "距離"]):
+    input_mode = "調教判定表から自動取得"
+    races = training_df[["場所", "R", "芝・ダ", "距離"]].copy()
+    races["場所"] = races["場所"].astype(str).str.strip()
+    races["芝・ダ"] = races["芝・ダ"].apply(normalize_surface)
+    races["R"] = pd.to_numeric(races["R"], errors="coerce")
+    races["距離"] = pd.to_numeric(races["距離"], errors="coerce")
+    races = races.dropna().drop_duplicates().sort_values(["場所", "R"])
 
-analyzer = SireAnalyzer(
-    race_df=race_df,
-    course_df=course_df,
-    lucky_df=lucky_df,
-)
+    active_places = races["場所"].dropna().unique().tolist()
+    st.caption("開催場・距離・芝/ダート・ZIは調教判定表から自動取得します。")
 
-# =====================================================
-# 出走馬入力方式
-# =====================================================
+    cushion_map = dict(st.session_state.get("cushion_by_place", {}))
+    going_map = dict(st.session_state.get("going_by_place", {}))
+    venue_cols = st.columns(max(1, len(active_places)))
+    for i, venue in enumerate(active_places):
+        vraces = races[races["場所"] == venue]
+        with venue_cols[i]:
+            st.markdown(f"### {venue}")
+            if (vraces["芝・ダ"] == "芝").any():
+                old = cushion_map.get(venue, "")
+                cv = st.text_input("芝 クッション値", value=str(old), key=f"cushion_{venue}", placeholder="例 9.3")
+                try:
+                    cushion_map[venue] = float(cv) if str(cv).strip() else None
+                except ValueError:
+                    cushion_map[venue] = None
+                    st.warning("数値で入力")
+            if (vraces["芝・ダ"] == "ダ").any():
+                opts = ["未指定", "良", "稍重", "重", "不良"]
+                oldg = going_map.get(venue) or "未指定"
+                gv = st.selectbox("ダート 馬場状態", opts, index=opts.index(oldg) if oldg in opts else 0, key=f"going_{venue}")
+                going_map[venue] = None if gv == "未指定" else gv
+    st.session_state["cushion_by_place"] = cushion_map
+    st.session_state["going_by_place"] = going_map
 
-if training_df is not None:
-    input_mode = st.radio(
-        "出走馬の入力方式",
-        [
-            "調教判定表から自動取得",
-            "手入力",
-        ],
-        horizontal=True,
-    )
+    st.markdown("#### RACE NAVIGATION")
+    race_options = []
+    race_map = {}
+    for _, rr in races.iterrows():
+        label = f'{rr["場所"]} {int(rr["R"])}R  {rr["芝・ダ"]}{int(rr["距離"])}m'
+        race_options.append(label); race_map[label] = rr
+    selected_race = st.selectbox("分析するレース", race_options, label_visibility="collapsed")
+    rr = race_map[selected_race]
+    place = str(rr["場所"]); race_no = int(rr["R"]); distance = int(rr["距離"])
+    surface = "芝" if normalize_surface(rr["芝・ダ"]) == "芝" else "ダート"
+    cushion = cushion_map.get(place) if surface == "芝" else None
+    going = going_map.get(place) if surface == "ダート" else None
+    sex = None
 else:
     input_mode = "手入力"
-    st.info(
-        "調教判定表を使用しないため、出走馬の入力方式は手入力になります。"
-    )
-
-st.subheader("レース条件")
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    place = st.selectbox(
-        "競馬場",
-        [
-            "すべて",
-            "札幌",
-            "函館",
-            "福島",
-            "新潟",
-            "東京",
-            "中山",
-            "中京",
-            "京都",
-            "阪神",
-            "小倉",
-        ],
-    )
-
-with col2:
-    course_tmp = course_df.copy()
-
-    course_tmp.columns = [
-        str(col).strip()
-        for col in course_tmp.columns
-    ]
-
-    surface_code = "芝" if surface == "芝" else "ダ"
-
-    if "芝・ダ" in course_tmp.columns:
-        course_tmp = course_tmp[
-            course_tmp["芝・ダ"].astype(str).str.strip() == surface_code
-        ]
-
-    if place != "すべて":
-        course_tmp = course_tmp[
-            course_tmp["場所"].astype(str).str.strip() == place
-        ]
-
-    distance_options = sorted(
-        pd.to_numeric(
-            course_tmp["距離"],
-            errors="coerce",
-        ).dropna().astype(int).unique()
-    )
-
-    if len(distance_options) == 0:
-        st.warning("選択条件に一致する距離がありません。")
-        st.stop()
-
-    distance = st.selectbox(
-        "距離",
-        distance_options,
-    )
-
-with col3:
-    if input_mode == "調教判定表から自動取得":
-        race_no = st.selectbox(
-            "レース番号",
-            list(range(1, 13)),
-        )
-    else:
-        race_no = None
-        st.info(
-            "手入力モードではレース番号は不要です。"
-        )
-
-
-sex = st.selectbox(
-    "対象性別",
-    [
-        "すべて",
-        "牡",
-        "牝",
-        "せん",
-    ],
-)
-
-if sex == "すべて":
+    cushion_map, going_map = {}, {}
+    surface = st.radio("馬場", ["芝", "ダート"], horizontal=True)
+    place = st.selectbox("競馬場", ["札幌","函館","福島","新潟","東京","中山","中京","京都","阪神","小倉"])
+    race_no = None
+    course_tmp = course_df.copy(); surface_code = "芝" if surface == "芝" else "ダ"
+    course_tmp = course_tmp[course_tmp["芝・ダ"].astype(str).str.strip() == surface_code]
+    course_tmp = course_tmp[course_tmp["場所"].astype(str).str.strip() == place]
+    distance_options = sorted(pd.to_numeric(course_tmp["距離"], errors="coerce").dropna().astype(int).unique())
+    distance = st.selectbox("距離", distance_options)
     sex = None
+    going = st.selectbox("馬場状態", ["未指定","良","稍重","重","不良"])
+    going = None if going == "未指定" else going
+    cushion = None
+    if surface == "芝":
+        ct = st.text_input("当日クッション値", value="")
+        try: cushion = float(ct) if ct.strip() else None
+        except ValueError: st.warning("クッション値は数値で入力してください。")
 
-
-going = st.selectbox(
-    "馬場状態",
-    [
-        "未指定",
-        "良",
-        "稍重",
-        "重",
-        "不良",
-    ],
-)
-
-if going == "未指定":
-    going = None
-
-
-cushion = None
-
-if surface == "芝":
-    cushion_text = st.text_input(
-        "当日クッション値",
-        value="",
-        placeholder="例：9.3",
-        help="Ver6は実数値を使い、±0.3 → ±0.5 → ±0.8の順で適応評価します。",
-    )
-    if str(cushion_text).strip() != "":
-        try:
-            cushion = float(cushion_text)
-        except ValueError:
-            st.warning("クッション値は 9.3 のような数値で入力してください。")
-            cushion = None
+race_df = data["turf"] if surface == "芝" else data["dirt"]
+lucky_df = data["turf_lucky"] if surface == "芝" else data["dirt_lucky"]
+analyzer = SireAnalyzer(race_df=race_df, course_df=course_df, lucky_df=lucky_df)
 
 # Ver6.1: prevent stale analysis results after race-condition changes.
 current_condition_signature = (
@@ -1804,9 +1787,7 @@ current_condition_signature = (
 if training_df is not None:
     st.subheader("本日の注目レース")
 
-    st.caption(
-        "調教判定で本命または相手の馬を対象に、Ver6最終評価でB以上の馬がいるレースを表示します。調教師・騎手も併記します。"
-    )
+    st.caption("最終評価Sの馬がいるレースだけを表示します。ZIは能力・相手候補の独立軸です。")
 
     show_top_summary = st.checkbox(
         "注目レース一覧を表示する",
@@ -1814,33 +1795,24 @@ if training_df is not None:
     )
 
     if show_top_summary:
-        target_place_list = st.multiselect(
-            "注目レース表示対象の競馬場",
-            [
-                "札幌",
-                "函館",
-                "福島",
-                "新潟",
-                "東京",
-                "中山",
-                "中京",
-                "京都",
-                "阪神",
-                "小倉",
-            ],
-            default=[],
-            help="未選択の場合は全競馬場を対象にします。",
-        )
+        target_place_list = active_places if "active_places" in locals() else []
 
         with st.spinner("注目レースを分析中です..."):
-            top_summary_df = create_top_race_summary_by_full_analysis(
-                training_df=training_df,
-                analyzer=analyzer,
-                surface=surface,
-                place_list=target_place_list,
-                cushion=cushion,
-                going=going,
-            )
+            # 芝・ダートを分離したまま両方を走査し、開催全体のS評価レースを集約
+            summaries = []
+            for summary_surface in ["芝", "ダート"]:
+                summary_analyzer = SireAnalyzer(
+                    race_df=data["turf"] if summary_surface == "芝" else data["dirt"],
+                    course_df=course_df,
+                    lucky_df=data["turf_lucky"] if summary_surface == "芝" else data["dirt_lucky"],
+                )
+                part = create_top_race_summary_by_full_analysis(
+                    training_df=training_df, analyzer=summary_analyzer, surface=summary_surface,
+                    place_list=target_place_list, cushion_map=cushion_map, going_map=going_map,
+                )
+                if len(part) > 0:
+                    summaries.append(part)
+            top_summary_df = pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame()
 
         if len(top_summary_df) > 0:
             st.dataframe(
@@ -1850,7 +1822,7 @@ if training_df is not None:
             )
         else:
             st.info(
-                "Ver6最終評価でB以上の馬がいるレースは見つかりませんでした。"
+                "最終評価Sの注目レースは見つかりませんでした。"
             )
 
 # =====================================================
@@ -2202,6 +2174,8 @@ if "results" in st.session_state:
         for record in training_records
     ]
 
+    result_df = add_zi_partner_columns(result_df)
+
     result_df["脚質"] = [
         "-"
         if record is None
@@ -2402,6 +2376,10 @@ if "results" in st.session_state:
         "最終評価",
         "最終スコア",
         "★",
+        "ZI",
+        "ZI順位",
+        "ZI差",
+        "ZI相手判定",
         "妙味条件",
         "評価理由",
         "前日坂路時計",
@@ -2425,7 +2403,6 @@ if "results" in st.session_state:
         "本人クッション幅",
         "馬場状態",
         "調教コース判定",
-        "ZI",
         "脚質",
     ]
 
