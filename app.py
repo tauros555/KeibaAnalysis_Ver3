@@ -8,6 +8,9 @@ import pandas as pd
 
 from io import StringIO
 from pathlib import Path
+import html as html_lib
+import re
+from urllib.request import Request, urlopen
 
 import config
 
@@ -1855,6 +1858,142 @@ if training_df is not None:
 
 
 # =====================================================
+# JRA 馬場情報 自動取得
+# =====================================================
+
+JRA_BABA_URLS = [
+    "https://www.jra.go.jp/keiba/baba/index.html",
+    "https://www.jra.go.jp/keiba/baba/index2.html",
+    "https://www.jra.go.jp/keiba/baba/index3.html",
+]
+
+
+def _strip_html(raw):
+    """最小限のHTML→テキスト変換。追加パッケージに依存しない。"""
+    if raw is None:
+        return ""
+    text = re.sub(r"<script\b.*?</script>", " ", str(raw), flags=re.I | re.S)
+    text = re.sub(r"<style\b.*?</style>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html_lib.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _decode_jra_response(raw_bytes, content_type=""):
+    """JRAページの文字コードを安全側に寄せて判定する。"""
+    candidates = []
+    m = re.search(r"charset=([\w\-]+)", content_type or "", flags=re.I)
+    if m:
+        candidates.append(m.group(1))
+    candidates += ["utf-8", "cp932", "shift_jis"]
+    for enc in candidates:
+        try:
+            return raw_bytes.decode(enc)
+        except Exception:
+            continue
+    return raw_bytes.decode("utf-8", errors="replace")
+
+
+def _parse_jra_baba_page(page_html, url):
+    """JRA馬場情報1ページから、競馬場・クッション値・芝/ダート状態を抽出する。"""
+    plain = _strip_html(page_html)
+
+    venue = None
+    for pat in [
+        r"馬場情報[（(]\s*([^）)]+?)競馬場\s*[）)]",
+        r"([^\s]+?)競馬場\s+馬場情報",
+    ]:
+        m = re.search(pat, plain)
+        if m:
+            venue = m.group(1).strip()
+            break
+
+    cushion = None
+    m = re.search(
+        r'id=["\']cushion_num["\'][^>]*>.*?<strong[^>]*>\s*([0-9]+(?:\.[0-9]+)?)\s*</strong>',
+        page_html,
+        flags=re.I | re.S,
+    )
+    if not m:
+        m = re.search(r"クッション値\s*([0-9]+(?:\.[0-9]+)?)", plain)
+    if m:
+        try:
+            cushion = float(m.group(1))
+        except Exception:
+            cushion = None
+
+    cushion_time = None
+    m = re.search(
+        r'id=["\']cushion_list["\'][^>]*>\s*<option[^>]*>(.*?)</option>',
+        page_html,
+        flags=re.I | re.S,
+    )
+    if m:
+        cushion_time = _strip_html(m.group(1)) or None
+
+    turf_going = None
+    dirt_going = None
+    # 「馬場状態」から「芝のクッション値」までにある芝/ダート状態を優先して読む。
+    status_match = re.search(r"馬場状態(.*?)芝のクッション値", plain, flags=re.S)
+    status_text = status_match.group(1) if status_match else plain
+    m = re.search(
+        r"芝\s*(良|稍重|重|不良).*?ダート\s*(良|稍重|重|不良)",
+        status_text,
+        flags=re.S,
+    )
+    if m:
+        turf_going, dirt_going = m.group(1), m.group(2)
+
+    status_time = None
+    m = re.search(r"馬場状態[（(]([^）)]+?現在)[）)]", plain)
+    if m:
+        status_time = m.group(1).strip()
+
+    return {
+        "venue": venue,
+        "cushion": cushion,
+        "cushion_time": cushion_time,
+        "turf_going": turf_going,
+        "dirt_going": dirt_going,
+        "status_time": status_time,
+        "url": url,
+    }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_jra_track_conditions():
+    """
+    JRAの当日馬場情報を取得する。
+    開催場の割当は index/index2/index3 に固定せず、ページタイトルから判定する。
+    失敗したページはスキップして、アプリ自体は手動入力で継続できる。
+    """
+    results = {}
+    errors = []
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        ),
+        "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
+    }
+
+    for url in JRA_BABA_URLS:
+        try:
+            req = Request(url, headers=headers)
+            with urlopen(req, timeout=8) as resp:
+                raw = resp.read()
+                page_html = _decode_jra_response(raw, resp.headers.get("Content-Type", ""))
+            info = _parse_jra_baba_page(page_html, url)
+            if info.get("venue"):
+                results[info["venue"]] = info
+        except Exception as e:
+            errors.append(f"{url}: {e}")
+
+    return results, errors
+
+
+# =====================================================
 # 第2ブロック / Ver7.1 Runaway's 当日ダッシュボード
 # =====================================================
 
@@ -1887,41 +2026,120 @@ if training_df is not None and all(c in training_df.columns for c in ["場所", 
     cushion_map = dict(st.session_state.get("cushion_by_place", {}))
     going_map = dict(st.session_state.get("going_by_place", {}))
 
+    refresh_col, source_col = st.columns([1, 3], vertical_alignment="center")
+    with refresh_col:
+        if st.button("🔄 JRA再取得", use_container_width=True):
+            fetch_jra_track_conditions.clear()
+            st.rerun()
+    with source_col:
+        st.caption("JRA公式馬場情報を自動取得。必要な場合だけ分析値を手動補正できます。")
+
+    with st.spinner("JRA馬場情報を取得中..."):
+        jra_conditions, jra_errors = fetch_jra_track_conditions()
+
     # Ver7.0と同じ配置：競馬場カードの下に共通のRACE NAVIGATIONを置く。
     venue_cols = st.columns(max(1, len(active_places)))
     for i, venue in enumerate(active_places):
         vraces = races[races["場所"] == venue]
+        official = jra_conditions.get(venue, {})
+
         with venue_cols[i]:
             with st.container(border=True):
                 st.markdown(f"### 🏇 {venue}")
+
+                if official:
+                    official_parts = []
+                    if official.get("turf_going"):
+                        official_parts.append(f'芝 {official["turf_going"]}')
+                    if official.get("cushion") is not None:
+                        official_parts.append(f'Cushion {official["cushion"]:.1f}')
+                    if official.get("dirt_going"):
+                        official_parts.append(f'ダ {official["dirt_going"]}')
+                    if official_parts:
+                        st.caption("JRA公式　" + " / ".join(official_parts))
+                    time_note = official.get("cushion_time") or official.get("status_time")
+                    if time_note:
+                        st.caption(f"公表・測定：{time_note}")
+                else:
+                    st.caption("JRA公式値を取得できませんでした。手動入力で利用できます。")
+
                 if (vraces["芝・ダ"] == "芝").any():
-                    old = cushion_map.get(venue, "")
-                    cv = st.text_input(
-                        "芝 クッション値",
-                        value=str(old) if old is not None else "",
-                        key=f"cushion_{venue}",
-                        placeholder="例 9.3",
-                    )
-                    try:
-                        cushion_map[venue] = float(cv) if str(cv).strip() else None
-                    except ValueError:
-                        cushion_map[venue] = None
-                        st.warning("クッション値は数値で入力してください。")
+                    official_cushion = official.get("cushion")
+                    adj_key = f"cushion_adjust_{venue}"
+                    manual_key = f"cushion_manual_{venue}"
+
+                    if official_cushion is not None:
+                        if adj_key not in st.session_state:
+                            st.session_state[adj_key] = 0.0
+                        adjustment = st.number_input(
+                            "芝 クッション補正",
+                            min_value=-1.0,
+                            max_value=1.0,
+                            step=0.1,
+                            format="%.1f",
+                            key=adj_key,
+                            help="例：雨で実質的に軟化したと見る場合は -0.1 ～ -0.3 など。",
+                        )
+                        cushion_map[venue] = round(float(official_cushion) + float(adjustment), 1)
+                        st.metric(
+                            "分析使用クッション値",
+                            f'{cushion_map[venue]:.1f}',
+                            delta=f'{adjustment:+.1f}' if abs(float(adjustment)) > 0.0001 else None,
+                        )
+                        if st.button("芝を公式値に戻す", key=f"reset_cushion_{venue}", use_container_width=True):
+                            st.session_state[adj_key] = 0.0
+                            st.rerun()
+                    else:
+                        old = cushion_map.get(venue, "")
+                        cv = st.text_input(
+                            "芝 クッション値（手動）",
+                            value=str(old) if old is not None else "",
+                            key=manual_key,
+                            placeholder="例 9.3",
+                        )
+                        try:
+                            cushion_map[venue] = float(cv) if str(cv).strip() else None
+                        except ValueError:
+                            cushion_map[venue] = None
+                            st.warning("クッション値は数値で入力してください。")
                 else:
                     cushion_map[venue] = None
 
                 if (vraces["芝・ダ"] == "ダ").any():
                     opts = ["未指定", "良", "稍重", "重", "不良"]
-                    oldg = going_map.get(venue) or "未指定"
+                    official_going = official.get("dirt_going")
+                    going_key = f"going_{venue}"
+                    init_key = f"going_initialized_{venue}"
+
+                    # 初回だけJRA公式値を採用。その後はユーザーの手動変更を維持する。
+                    if not st.session_state.get(init_key, False):
+                        initial = official_going or going_map.get(venue) or "未指定"
+                        st.session_state[going_key] = initial if initial in opts else "未指定"
+                        st.session_state[init_key] = True
+
                     gv = st.selectbox(
-                        "ダート 馬場状態",
+                        "ダート 馬場状態（分析使用）",
                         opts,
-                        index=opts.index(oldg) if oldg in opts else 0,
-                        key=f"going_{venue}",
+                        key=going_key,
                     )
                     going_map[venue] = None if gv == "未指定" else gv
+
+                    if official_going and gv != official_going:
+                        st.caption(f"手動補正中：JRA公式 {official_going} → 分析 {gv}")
+
+                    if st.button("ダートを公式値に戻す", key=f"reset_going_{venue}", use_container_width=True):
+                        if official_going in opts:
+                            st.session_state[going_key] = official_going
+                            going_map[venue] = official_going
+                        st.rerun()
                 else:
                     going_map[venue] = None
+
+    if not jra_conditions and jra_errors:
+        with st.expander("JRA自動取得エラー", expanded=False):
+            st.caption("自動取得に失敗しても、従来どおり手動入力で分析できます。")
+            for err in jra_errors:
+                st.code(err)
 
     st.session_state["cushion_by_place"] = cushion_map
     st.session_state["going_by_place"] = going_map

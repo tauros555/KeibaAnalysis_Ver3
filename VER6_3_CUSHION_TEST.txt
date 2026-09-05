@@ -1,0 +1,48 @@
+{
+  "ロードカナロア": {
+    "9.0": {
+      "grade": "○",
+      "width": 0.3,
+      "sample": 1641,
+      "scope": "クッション9.0±0.3",
+      "method": null
+    },
+    "9.3": {
+      "grade": "△",
+      "width": 0.3,
+      "sample": 2045,
+      "scope": "クッション9.3±0.3",
+      "method": null
+    },
+    "9.5": {
+      "grade": "△",
+      "width": 0.3,
+      "sample": 2050,
+      "scope": "クッション9.5±0.3",
+      "method": null
+    }
+  },
+  "ドゥラメンテ": {
+    "9.0": {
+      "grade": "△",
+      "width": 0.3,
+      "sample": 1169,
+      "scope": "クッション9.0±0.3",
+      "method": null
+    },
+    "9.3": {
+      "grade": "△",
+      "width": 0.3,
+      "sample": 1473,
+      "scope": "クッション9.3±0.3",
+      "method": null
+    },
+    "9.5": {
+      "grade": "△",
+      "width": 0.3,
+      "sample": 1448,
+      "scope": "クッション9.5±0.3",
+      "method": null
+    }
+  }
+}
