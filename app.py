@@ -1908,19 +1908,10 @@ def _parse_jra_baba_page(page_html, url):
             venue = m.group(1).strip()
             break
 
+    # JRAのクッション値はJavaScript描画後に実測値へ更新される。
+    # 生HTMLでは目盛りの 12 / 10 / 8 / 7 を誤取得するため、ここでは読まない。
+    # 実測値は _fetch_rendered_cushion_values() で描画後DOMから取得する。
     cushion = None
-    m = re.search(
-        r'id=["\']cushion_num["\'][^>]*>.*?<strong[^>]*>\s*([0-9]+(?:\.[0-9]+)?)\s*</strong>',
-        page_html,
-        flags=re.I | re.S,
-    )
-    if not m:
-        m = re.search(r"クッション値\s*([0-9]+(?:\.[0-9]+)?)", plain)
-    if m:
-        try:
-            cushion = float(m.group(1))
-        except Exception:
-            cushion = None
 
     cushion_time = None
     m = re.search(
@@ -1960,6 +1951,70 @@ def _parse_jra_baba_page(page_html, url):
     }
 
 
+def _fetch_rendered_cushion_values(urls):
+    """Selenium/ChromiumでJRAページ描画後の実測クッション値を取得する。"""
+    rendered = {}
+    errors = []
+    driver = None
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+
+        options = webdriver.ChromeOptions()
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1280,900")
+        options.add_argument("--lang=ja-JP")
+        options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36")
+
+        driver = webdriver.Chrome(options=options)
+        wait = WebDriverWait(driver, 15)
+
+        for url in urls:
+            try:
+                driver.get(url)
+                value_el = wait.until(
+                    EC.visibility_of_element_located((By.CSS_SELECTOR, "#cushion_num p strong"))
+                )
+                time_el = wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "#cushion_list option:first-child"))
+                )
+                value_text = value_el.text.strip()
+                time_text = time_el.text.strip()
+                body_text = driver.find_element(By.TAG_NAME, "body").text
+
+                venue = None
+                m = re.search(r"馬場情報[（(]\s*([^）)]+?)競馬場\s*[）)]", body_text)
+                if not m:
+                    m = re.search(r"(札幌|函館|福島|新潟|東京|中山|中京|京都|阪神|小倉)競馬場", body_text)
+                if m:
+                    venue = m.group(1).strip()
+
+                if venue and re.fullmatch(r"\d+(?:\.\d+)?", value_text):
+                    rendered[venue] = {
+                        "cushion": float(value_text),
+                        "cushion_time": time_text or None,
+                    }
+                else:
+                    errors.append(f"{url}: クッション実測値を判定できませんでした ({value_text!r})")
+            except Exception as e:
+                errors.append(f"{url}: ブラウザ取得失敗 - {e}")
+    except Exception as e:
+        errors.append(f"Chromium/Seleniumを起動できませんでした - {e}")
+    finally:
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+    return rendered, errors
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_jra_track_conditions():
     """
@@ -1989,6 +2044,14 @@ def fetch_jra_track_conditions():
                 results[info["venue"]] = info
         except Exception as e:
             errors.append(f"{url}: {e}")
+
+    # クッション値はJavaScript描画後の「測定時刻直下の実測値」を採用する。
+    rendered_cushions, rendered_errors = _fetch_rendered_cushion_values(JRA_BABA_URLS)
+    errors.extend(rendered_errors)
+    for venue, rendered_info in rendered_cushions.items():
+        if venue in results:
+            results[venue]["cushion"] = rendered_info.get("cushion")
+            results[venue]["cushion_time"] = rendered_info.get("cushion_time")
 
     return results, errors
 
