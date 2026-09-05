@@ -1588,9 +1588,10 @@ html, body, [class*="css"] {
 /* タイトル画像 */
 [data-testid="stImage"] img {
     width: 100%;
-    max-height: 370px;
-    object-fit: cover;
-    object-position: center 55%;
+    height: auto;
+    max-height: none;
+    object-fit: contain;
+    object-position: center;
     border-radius: 10px;
     border: 1px solid rgba(241, 199, 106, .50);
     box-shadow: 0 14px 34px rgba(0, 0, 0, .34);
