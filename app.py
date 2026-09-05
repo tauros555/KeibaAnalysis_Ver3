@@ -1,6 +1,6 @@
 # =====================================================
-# app.py Ver7.2
-# Runaway's UI統合 + JRA馬場情報 + 単勝オッズ自動取得 + 妙味自動判定 対応版 v11
+# app.py Ver7.1
+# Runaway's UI統合 + 芝・ダート別最終評価 + 調教師/騎手表示 + 注目レース一覧 対応版
 # =====================================================
 
 import streamlit as st
@@ -10,7 +10,6 @@ from io import StringIO
 from pathlib import Path
 import html as html_lib
 import re
-import time
 from urllib.request import Request, urlopen
 
 import config
@@ -1148,49 +1147,6 @@ def score_star(surface, score):
     return ""
 
 
-def value_star_with_odds(surface, score, odds):
-    """最終スコア + 現在単勝オッズで、実際に妙味条件へ入った時だけ★を返す。"""
-    surface = normalize_surface_label(surface)
-    try:
-        v = float(score)
-        o = float(odds)
-    except Exception:
-        return ""
-
-    if surface == "ダート":
-        if v >= 8.0 and 10.0 <= o <= 20.0:
-            return "★★★"
-        if v >= 7.5 and 10.0 <= o <= 20.0:
-            return "★★"
-        return ""
-
-    if surface == "芝":
-        if v >= 8.5 and 20.0 <= o <= 50.0:
-            return "★★★"
-        if v >= 8.25 and 10.0 <= o <= 20.0:
-            return "★★"
-        return ""
-
-    return ""
-
-
-def value_judgement_with_odds(surface, score, odds):
-    """現在単勝オッズ込みの妙味判定。未取得時は理論条件を残す。"""
-    theoretical = value_condition(surface, score)
-    if theoretical == "-":
-        return "-"
-    try:
-        o = float(odds)
-    except Exception:
-        return f"オッズ未取得｜{theoretical}"
-
-    star = value_star_with_odds(surface, score, o)
-    if star:
-        label = theoretical.split("：", 1)[0]
-        return f"{label}【該当】"
-    return f"条件外（単勝{o:.1f}倍）"
-
-
 def value_condition(surface, score):
     surface = normalize_surface_label(surface)
 
@@ -2136,390 +2092,6 @@ def fetch_jra_track_conditions():
 
 
 # =====================================================
-# Ver7.2 / JRA 単勝オッズ自動取得
-# =====================================================
-
-JRA_VENUE_CODES = {
-    "札幌": "01", "函館": "02", "福島": "03", "新潟": "04", "東京": "05",
-    "中山": "06", "中京": "07", "京都": "08", "阪神": "09", "小倉": "10",
-}
-
-
-def _normalize_yyyymmdd(value):
-    """調教判定表の年月日を YYYYMMDD 8桁文字列にする。"""
-    if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except Exception:
-        pass
-    text = re.sub(r"\D", "", str(value))
-    if len(text) >= 8:
-        return text[:8]
-    try:
-        return f"{int(float(value)):08d}"
-    except Exception:
-        return None
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _fetch_jra_meeting_info(yyyymmdd):
-    """JRA開催日程ページから「4回中山2日」の回次・日次を取得する。"""
-    if not yyyymmdd or len(yyyymmdd) != 8:
-        return {}, ["開催日を判定できませんでした。"]
-    y, m, md = yyyymmdd[:4], int(yyyymmdd[4:6]), yyyymmdd[4:8]
-    url = f"https://www.jra.go.jp/keiba/calendar{y}/{y}/{m}/{md}.html"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
-        "Accept-Language": "ja,en-US;q=0.8",
-    }
-    try:
-        req = Request(url, headers=headers)
-        with urlopen(req, timeout=10) as resp:
-            raw = resp.read()
-            page_html = _decode_jra_response(raw, resp.headers.get("Content-Type", ""))
-        plain = _strip_html(page_html)
-        meetings = {}
-        for kai, venue, day in re.findall(
-            r"(\d+)回\s*(札幌|函館|福島|新潟|東京|中山|中京|京都|阪神|小倉)\s*(\d+)日",
-            plain,
-        ):
-            meetings[venue] = {"kai": int(kai), "day": int(day)}
-        return meetings, ([] if meetings else [f"開催情報を抽出できませんでした: {url}"])
-    except Exception as e:
-        return {}, [f"開催情報取得失敗: {url} - {e}"]
-
-
-def _make_jra_odds_urls(place, race_no, yyyymmdd, kai, day):
-    """JRA出馬表URLの入口候補を返す。
-
-    CNAME本体は ``01 + 場コード + 年 + 回 + 日 + R + 年月日`` で組めるが、
-    JRAの実レースURL末尾には ``/BA`` や ``/1E`` のような2文字トークンが付く。
-    このトークンはレースごとに異なり推測できないため、v12では固定値を付けず、
-    まず入口URLを開いてJRA自身が出すリンクから実URLを発見する。
-    """
-    code = JRA_VENUE_CODES.get(str(place).strip())
-    if not code:
-        return []
-    base_key = f"01{code}{yyyymmdd[:4]}{int(kai):02d}{int(day):02d}{int(race_no):02d}{yyyymmdd}"
-    return [
-        (f"https://app.jra.jp/JRADB/accessD.html?CNAME=sw01ddd{base_key}", base_key),
-        (f"https://app.jra.jp/JRADB/accessD.html?CNAME=sw01dde{base_key}", base_key),
-    ]
-
-
-def _jra_target_page_ok(driver, yyyymmdd, place, race_no):
-    from selenium.webdriver.common.by import By
-    try:
-        body_text = driver.find_element(By.TAG_NAME, "body").text
-    except Exception:
-        return False
-    date_ok = f"{int(yyyymmdd[4:6])}月{int(yyyymmdd[6:8])}日" in body_text
-    place_ok = str(place) in body_text
-    race_ok = (f"{int(race_no)}レース" in body_text) or (f"{int(race_no)}R" in body_text)
-    return bool(date_ok and place_ok and race_ok)
-
-
-def _discover_and_open_jra_race(driver, wait, entry_url, base_key, yyyymmdd, place, race_no, kai, day):
-    """入口/選択画面からJRA自身のリンクを辿って対象レースを開く。"""
-    from selenium.webdriver.common.by import By
-
-    driver.get(entry_url)
-    wait.until(lambda d: d.find_element(By.TAG_NAME, "body").text.strip() != "")
-    time.sleep(0.8)
-    if _jra_target_page_ok(driver, yyyymmdd, place, race_no):
-        return True
-
-    # 1) 入口ページ内に対象CNAMEの実リンク（末尾トークン付き）があれば直接開く。
-    for a in driver.find_elements(By.CSS_SELECTOR, "a[href]"):
-        href = a.get_attribute("href") or ""
-        if base_key in href:
-            driver.get(href)
-            wait.until(lambda d: d.find_element(By.TAG_NAME, "body").text.strip() != "")
-            time.sleep(0.8)
-            if _jra_target_page_ok(driver, yyyymmdd, place, race_no):
-                return True
-
-    # 2) 開催選択画面なら、まず対象開催（例: 4回中山2日）をクリック。
-    meet_label = f"{int(kai)}回{place}{int(day)}日"
-    links = driver.find_elements(By.CSS_SELECTOR, "a[href]")
-    meet_href = None
-    for a in links:
-        txt = (a.text or "").replace(" ", "")
-        if meet_label in txt:
-            meet_href = a.get_attribute("href")
-            if meet_href:
-                break
-    if meet_href:
-        driver.get(meet_href)
-        wait.until(lambda d: d.find_element(By.TAG_NAME, "body").text.strip() != "")
-        time.sleep(0.8)
-        if _jra_target_page_ok(driver, yyyymmdd, place, race_no):
-            return True
-
-        # 開催ページに並ぶ1R〜12Rのリンクから対象Rを選ぶ。
-        for a in driver.find_elements(By.CSS_SELECTOR, "a[href]"):
-            href = a.get_attribute("href") or ""
-            txt = (a.text or "").strip()
-            # hrefのCNAME本体一致を最優先。表示テキストは画像リンクで空の場合がある。
-            if base_key in href or txt in {f"{int(race_no)}レース", f"{int(race_no)}R", str(int(race_no))}:
-                driver.get(href)
-                wait.until(lambda d: d.find_element(By.TAG_NAME, "body").text.strip() != "")
-                time.sleep(0.8)
-                if _jra_target_page_ok(driver, yyyymmdd, place, race_no):
-                    return True
-
-    return False
-
-
-def _parse_odds_from_rendered_rows(driver, expected_horses):
-    """描画後の出馬表から、調教判定表の馬名をキーに単勝・人気を拾う。"""
-    from selenium.webdriver.common.by import By
-
-    expected = []
-    for h in expected_horses:
-        no = to_int_or_none(h.get("horse_no"))
-        name = normalize_text(h.get("horse_name", ""))
-        if no is not None and name:
-            expected.append((no, name, h.get("horse_name", "")))
-
-    found = {}
-    rows = driver.find_elements(By.CSS_SELECTOR, "tr")
-    for row in rows:
-        row_text = row.text or ""
-        row_norm = normalize_text(row_text)
-        if not row_norm:
-            continue
-        cells = row.find_elements(By.CSS_SELECTOR, "th,td")
-        cell_texts = [(c.text or "").strip() for c in cells]
-
-        for horse_no, name_norm, display_name in expected:
-            if horse_no in found or name_norm not in row_norm:
-                continue
-
-            odds = None
-            popularity = None
-
-            # 最優先：JRAの「12.3 (4番人気)」形式。
-            m = re.search(r"(\d{1,4}(?:\.\d+)?)\s*[（(]\s*(\d+)\s*番人気\s*[）)]", row_text)
-            if m:
-                odds = float(m.group(1))
-                popularity = int(m.group(2))
-
-            # 次点：馬名セルの直後にある単勝オッズ列を探す。
-            if odds is None and cell_texts:
-                horse_idx = None
-                for i, txt in enumerate(cell_texts):
-                    if name_norm and name_norm in normalize_text(txt):
-                        horse_idx = i
-                        break
-                if horse_idx is not None:
-                    for txt in cell_texts[horse_idx + 1: horse_idx + 4]:
-                        pm = re.search(r"(\d+)\s*番人気", txt)
-                        if pm:
-                            popularity = int(pm.group(1))
-                        om = re.fullmatch(r"\s*(\d{1,4}(?:\.\d+)?)\s*(?:[（(]\s*\d+\s*番人気\s*[）)])?\s*", txt)
-                        if om:
-                            candidate = float(om.group(1))
-                            # 馬体重や斤量セルは通常 kg/記号を伴うため、純数値セルをオッズ候補にする。
-                            if 1.0 <= candidate <= 9999.9:
-                                odds = candidate
-                                break
-
-            # クラス名に odds を含むセルがあればさらに補完。
-            if odds is None:
-                for c, txt in zip(cells, cell_texts):
-                    cls = (c.get_attribute("class") or "").lower()
-                    if "odds" not in cls:
-                        continue
-                    om = re.search(r"(\d{1,4}(?:\.\d+)?)", txt)
-                    if om:
-                        odds = float(om.group(1))
-                    pm = re.search(r"(\d+)\s*番人気", txt)
-                    if pm:
-                        popularity = int(pm.group(1))
-                    if odds is not None:
-                        break
-
-            if odds is not None:
-                found[horse_no] = {
-                    "horse_no": horse_no,
-                    "horse_name": display_name,
-                    "odds": odds,
-                    "popularity": popularity,
-                }
-    return found
-
-
-def fetch_jra_win_odds_batch(race_requests):
-    """
-    複数レースの単勝オッズをChromium 1起動で取得。
-    race_requests: [{date, place, race_no, horses}, ...]
-    """
-    results = {}
-    errors = []
-    if not race_requests:
-        return results, errors
-
-    driver = None
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-
-        options = webdriver.ChromeOptions()
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1440,1200")
-        options.add_argument("--lang=ja-JP")
-        options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36")
-        driver = webdriver.Chrome(options=options)
-        wait = WebDriverWait(driver, 12)
-
-        meeting_cache = {}
-        for req in race_requests:
-            yyyymmdd = _normalize_yyyymmdd(req.get("date"))
-            place = str(req.get("place", "")).strip()
-            race_no = to_int_or_none(req.get("race_no"))
-            horses = req.get("horses", [])
-            key = f"{yyyymmdd}_{place}_{race_no}"
-            if not yyyymmdd or not place or race_no is None:
-                errors.append(f"{key}: レース識別情報不足")
-                continue
-
-            if yyyymmdd not in meeting_cache:
-                meeting_cache[yyyymmdd] = _fetch_jra_meeting_info(yyyymmdd)
-            meetings, meet_errors = meeting_cache[yyyymmdd]
-            if meet_errors:
-                errors.extend(meet_errors)
-            meet = meetings.get(place)
-            if not meet:
-                errors.append(f"{key}: {place}の回次・日次を取得できませんでした")
-                continue
-
-            success = False
-            last_reason = ""
-            for entry_url, base_key in _make_jra_odds_urls(place, race_no, yyyymmdd, meet["kai"], meet["day"]):
-                try:
-                    opened = _discover_and_open_jra_race(
-                        driver, wait, entry_url, base_key,
-                        yyyymmdd, place, race_no, meet["kai"], meet["day"]
-                    )
-                    if not opened:
-                        last_reason = "JRA選択画面から対象レースの実URLを発見できず"
-                        continue
-                    body_text = driver.find_element(By.TAG_NAME, "body").text
-                    odds = _parse_odds_from_rendered_rows(driver, horses)
-
-                    # 対象馬がいるのに1頭も拾えない場合は、別形式の出馬表URLも試す。
-                    # v10はここで0件を「発売前」とみなして終了したため、URL/DOM不一致を見逃していた。
-                    if horses and not odds:
-                        if "単勝" in body_text or "オッズ" in body_text:
-                            last_reason = "対象レースは開けたが単勝オッズを抽出できず"
-                            continue
-
-                    results[key] = {
-                        "date": yyyymmdd,
-                        "place": place,
-                        "race_no": race_no,
-                        "horses": odds,
-                        "url": driver.current_url,
-                    }
-                    # 発売前など、JRAページ自体にオッズ表示が無い場合だけ0件を許容する。
-                    success = True
-                    break
-                except Exception as e:
-                    last_reason = str(e)
-            if not success:
-                errors.append(f"{key}: JRA出馬表取得失敗 - {last_reason}")
-    except Exception as e:
-        errors.append(f"単勝オッズ用Chromium/Seleniumを起動できませんでした - {e}")
-    finally:
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
-    return results, errors
-
-
-def _race_date_from_training(training_df, place, race_no):
-    if training_df is None or "年月日" not in training_df.columns:
-        return None
-    tmp = training_df.copy()
-    tmp["R_num"] = pd.to_numeric(tmp.get("R"), errors="coerce")
-    hit = tmp[(tmp["場所"].astype(str).str.strip() == str(place).strip()) & (tmp["R_num"] == int(race_no))]
-    if len(hit) == 0:
-        return None
-    return _normalize_yyyymmdd(hit.iloc[0].get("年月日"))
-
-
-def _horses_for_odds_request(training_df, place, race_no):
-    if training_df is None:
-        return []
-    tmp = training_df.copy()
-    tmp["R_num"] = pd.to_numeric(tmp.get("R"), errors="coerce")
-    tmp["馬番_num"] = pd.to_numeric(tmp.get("馬番"), errors="coerce")
-    hit = tmp[(tmp["場所"].astype(str).str.strip() == str(place).strip()) & (tmp["R_num"] == int(race_no))]
-    hit = hit.sort_values("馬番_num")
-    return [
-        {"horse_no": to_int_or_none(r.get("馬番")), "horse_name": r.get("馬名", "")}
-        for _, r in hit.iterrows()
-        if to_int_or_none(r.get("馬番")) is not None and normalize_text(r.get("馬名", ""))
-    ]
-
-
-def build_odds_requests(training_df, race_pairs):
-    reqs = []
-    seen = set()
-    for place, race_no in race_pairs:
-        rno = to_int_or_none(race_no)
-        if rno is None:
-            continue
-        date = _race_date_from_training(training_df, place, rno)
-        key = (date, str(place).strip(), rno)
-        if not date or key in seen:
-            continue
-        seen.add(key)
-        reqs.append({
-            "date": date,
-            "place": str(place).strip(),
-            "race_no": rno,
-            "horses": _horses_for_odds_request(training_df, place, rno),
-        })
-    return reqs
-
-
-def get_cached_win_odds(training_df, place, race_no, horse_no):
-    date = _race_date_from_training(training_df, place, race_no)
-    key = f"{date}_{str(place).strip()}_{int(race_no)}"
-    race = st.session_state.get("jra_win_odds_cache", {}).get(key, {})
-    horse = race.get("horses", {}).get(to_int_or_none(horse_no), {})
-    return horse.get("odds"), horse.get("popularity")
-
-
-def merge_odds_into_result_df(df, training_df):
-    if df is None or len(df) == 0:
-        return df
-    out = df.copy()
-    odds_list, pop_list, stars, judgements = [], [], [], []
-    for _, row in out.iterrows():
-        odds, pop = get_cached_win_odds(training_df, row.get("場所", ""), row.get("R", 0), row.get("馬番"))
-        odds_list.append("-" if odds is None else round(float(odds), 1))
-        pop_list.append("-" if pop is None else int(pop))
-        stars.append(value_star_with_odds(row.get("芝・ダ", ""), row.get("最終スコア"), odds))
-        judgements.append(value_judgement_with_odds(row.get("芝・ダ", ""), row.get("最終スコア"), odds))
-    out["単勝オッズ"] = odds_list
-    out["人気"] = pop_list
-    out["★"] = stars
-    out["妙味条件"] = judgements
-    return out
-
-
-# =====================================================
 # 第2ブロック / Ver7.1 Runaway's 当日ダッシュボード
 # =====================================================
 
@@ -2760,45 +2332,11 @@ if training_df is not None:
         top_summary_df = pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame()
 
     if len(top_summary_df) > 0:
-        race_pairs = list(top_summary_df[["場所", "R"]].drop_duplicates().itertuples(index=False, name=None))
-        odds_requests = build_odds_requests(training_df, race_pairs)
-        odds_cache = dict(st.session_state.get("jra_win_odds_cache", {}))
-        request_keys = {f'{r["date"]}_{r["place"]}_{r["race_no"]}' for r in odds_requests}
-        missing_requests = [r for r in odds_requests if f'{r["date"]}_{r["place"]}_{r["race_no"]}' not in odds_cache]
-
-        # 初回だけ注目レースの単勝を自動取得。以後はボタン操作時だけ更新する。
-        if missing_requests:
-            with st.spinner("JRA単勝オッズを取得中です..."):
-                new_odds, odds_errors = fetch_jra_win_odds_batch(missing_requests)
-            odds_cache.update(new_odds)
-            st.session_state["jra_win_odds_cache"] = odds_cache
-            if odds_errors:
-                st.session_state["jra_win_odds_errors"] = odds_errors
-
-        odds_col, odds_note_col = st.columns([1, 3], vertical_alignment="center")
-        with odds_col:
-            if st.button("🔄 オッズ再取得", key="refresh_top_odds", use_container_width=True):
-                with st.spinner("JRA単勝オッズを更新中です..."):
-                    refreshed, odds_errors = fetch_jra_win_odds_batch(odds_requests)
-                odds_cache.update(refreshed)
-                st.session_state["jra_win_odds_cache"] = odds_cache
-                st.session_state["jra_win_odds_errors"] = odds_errors
-                st.rerun()
-        with odds_note_col:
-            st.caption("単勝オッズはJRA公式から取得。★は最終スコア＋現在オッズが妙味条件に入った時だけ表示します。")
-
-        top_summary_df = merge_odds_into_result_df(top_summary_df, training_df)
         st.dataframe(
             top_summary_df,
             use_container_width=True,
             hide_index=True,
         )
-        odds_errors = st.session_state.get("jra_win_odds_errors", [])
-        if odds_errors:
-            with st.expander("JRAオッズ取得メモ", expanded=False):
-                st.caption("発売前は単勝オッズが「-」になります。取得失敗時も分析自体は継続します。")
-                for err in odds_errors[-20:]:
-                    st.code(err)
     else:
         st.info(
             "最終評価Sの注目レースは見つかりませんでした。"
@@ -3254,36 +2792,8 @@ if "results" in st.session_state:
     result_df["最終評価"] = final_grades
     result_df["最終スコア"] = final_scores
     result_df["表面確認"] = [normalize_surface_label(surface) for _ in final_scores]
-
-    # Ver7.2: 選択レースの単勝オッズがまだなければ初回だけ取得。
-    selected_date = _race_date_from_training(training_df, place, race_no) if training_df is not None and race_no is not None else None
-    selected_key = f"{selected_date}_{place}_{race_no}" if selected_date and race_no is not None else None
-    odds_cache = dict(st.session_state.get("jra_win_odds_cache", {}))
-    if selected_key and selected_key not in odds_cache:
-        reqs = build_odds_requests(training_df, [(place, race_no)])
-        if reqs:
-            with st.spinner("選択レースのJRA単勝オッズを取得中です..."):
-                fetched, odds_errors = fetch_jra_win_odds_batch(reqs)
-            odds_cache.update(fetched)
-            st.session_state["jra_win_odds_cache"] = odds_cache
-            if odds_errors:
-                st.session_state["jra_win_odds_errors"] = odds_errors
-
-    current_odds = []
-    current_pop = []
-    actual_stars = []
-    actual_judgements = []
-    for horse_no, score in zip(result_df.get("馬番", [None] * len(result_df)), final_scores):
-        odds, pop = get_cached_win_odds(training_df, place, race_no, horse_no) if training_df is not None and race_no is not None else (None, None)
-        current_odds.append("-" if odds is None else round(float(odds), 1))
-        current_pop.append("-" if pop is None else int(pop))
-        actual_stars.append(value_star_with_odds(surface, score, odds))
-        actual_judgements.append(value_judgement_with_odds(surface, score, odds))
-
-    result_df["単勝オッズ"] = current_odds
-    result_df["人気"] = current_pop
-    result_df["★"] = actual_stars
-    result_df["妙味条件"] = actual_judgements
+    result_df["★"] = [score_star(surface, v) for v in final_scores]
+    result_df["妙味条件"] = [value_condition(surface, v) for v in final_scores]
     result_df["評価理由"] = final_reasons
 
     # -----------------------------
@@ -3380,8 +2890,6 @@ if "results" in st.session_state:
         "騎手",
         "最終評価",
         "最終スコア",
-        "単勝オッズ",
-        "人気",
         "★",
         "ZI",
         "ZI順位",
