@@ -1727,9 +1727,6 @@ else:
 st.markdown('<div class="rw-version">Race Analysis System — Ver7.1</div>', unsafe_allow_html=True)
 st.markdown('<div class="rw-tagline">データで見抜く、勝利への直線。</div>', unsafe_allow_html=True)
 
-# 注目レースはTRACK CONDITIONより上に表示するためのプレースホルダー
-top_race_container = st.container()
-
 
 # =====================================================
 # データ読込
@@ -1991,44 +1988,43 @@ current_condition_signature = (
 )
 
 # =====================================================
-# トップページ：相手候補以上レース一覧
+# RACE NAVIGATION直下：注目レース一覧
 # =====================================================
 
-with top_race_container:
-    if training_df is not None:
-        st.subheader("🏆 注目レース")
+if training_df is not None:
+    st.subheader("🏆 注目レース")
 
-        st.caption("S評価の馬がいるレースのみを表示しています。ZIは能力・相手候補の独立軸です。")
+    st.caption("S評価の馬がいるレースのみを表示しています。ZIは能力・相手候補の独立軸です。")
 
-        target_place_list = active_places if "active_places" in locals() else []
+    target_place_list = active_places if "active_places" in locals() else []
 
-        with st.spinner("注目レースを分析中です..."):
-            # 芝・ダートを分離したまま両方を走査し、開催全体のS評価レースを集約
-            summaries = []
-            for summary_surface in ["芝", "ダート"]:
-                summary_analyzer = SireAnalyzer(
-                    race_df=data["turf"] if summary_surface == "芝" else data["dirt"],
-                    course_df=course_df,
-                    lucky_df=data["turf_lucky"] if summary_surface == "芝" else data["dirt_lucky"],
-                )
-                part = create_top_race_summary_by_full_analysis(
-                    training_df=training_df, analyzer=summary_analyzer, surface=summary_surface,
-                    place_list=target_place_list, cushion_map=cushion_map, going_map=going_map,
-                )
-                if len(part) > 0:
-                    summaries.append(part)
-            top_summary_df = pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame()
-
-        if len(top_summary_df) > 0:
-            st.dataframe(
-                top_summary_df,
-                use_container_width=True,
-                hide_index=True,
+    with st.spinner("注目レースを分析中です..."):
+        # 芝・ダートを分離したまま両方を走査し、開催全体のS評価レースを集約
+        summaries = []
+        for summary_surface in ["芝", "ダート"]:
+            summary_analyzer = SireAnalyzer(
+                race_df=data["turf"] if summary_surface == "芝" else data["dirt"],
+                course_df=course_df,
+                lucky_df=data["turf_lucky"] if summary_surface == "芝" else data["dirt_lucky"],
             )
-        else:
-            st.info(
-                "最終評価Sの注目レースは見つかりませんでした。"
+            part = create_top_race_summary_by_full_analysis(
+                training_df=training_df, analyzer=summary_analyzer, surface=summary_surface,
+                place_list=target_place_list, cushion_map=cushion_map, going_map=going_map,
             )
+            if len(part) > 0:
+                summaries.append(part)
+        top_summary_df = pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame()
+
+    if len(top_summary_df) > 0:
+        st.dataframe(
+            top_summary_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info(
+            "最終評価Sの注目レースは見つかりませんでした。"
+        )
 # =====================================================
 # 出走馬データ作成
 # =====================================================
