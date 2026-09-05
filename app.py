@@ -1,6 +1,6 @@
 # =====================================================
 # app.py Ver7.2
-# Runaway's UI統合 + JRA馬場情報 + 単勝オッズ自動取得 + 妙味自動判定 対応版
+# Runaway's UI統合 + JRA馬場情報 + 単勝オッズ自動取得 + 妙味自動判定 対応版 v11
 # =====================================================
 
 import streamlit as st
@@ -2192,16 +2192,21 @@ def _fetch_jra_meeting_info(yyyymmdd):
 
 
 def _make_jra_odds_urls(place, race_no, yyyymmdd, kai, day):
-    """JRA詳細出馬表URL候補。末尾識別子はJRA側で省略可能な場合を優先する。"""
+    """JRA出馬表URL候補。
+
+    JRAのCNAMEキーは ``01 + 場コード + 年 + 回 + 日 + R + 年月日``。
+    v10では先頭の ``01`` が欠けていたため、別ページへ遷移してオッズを取得できなかった。
+    ``sw01ddd``（PC詳細出馬表）と ``sw01dde``（簡易詳細出馬表）の両方を試す。
+    """
     code = JRA_VENUE_CODES.get(str(place).strip())
     if not code:
         return []
-    base_key = f"{code}{yyyymmdd[:4]}{int(kai):02d}{int(day):02d}{int(race_no):02d}{yyyymmdd}"
+    base_key = f"01{code}{yyyymmdd[:4]}{int(kai):02d}{int(day):02d}{int(race_no):02d}{yyyymmdd}"
     return [
         f"https://app.jra.jp/JRADB/accessD.html?CNAME=sw01ddd{base_key}",
         f"https://app.jra.jp/JRADB/accessD.html?CNAME=sw01ddd{base_key}%2F00",
-        f"https://www.jra.go.jp/JRADB/accessD.html?CNAME=pw01dde{base_key}",
-        f"https://www.jra.go.jp/JRADB/accessD.html?CNAME=pw01dde{base_key}%2F00",
+        f"https://app.jra.jp/JRADB/accessD.html?CNAME=sw01dde{base_key}",
+        f"https://app.jra.jp/JRADB/accessD.html?CNAME=sw01dde{base_key}%2F00",
     ]
 
 
@@ -2348,6 +2353,14 @@ def fetch_jra_win_odds_batch(race_requests):
                         last_reason = "対象レース表示を確認できず"
                         continue
                     odds = _parse_odds_from_rendered_rows(driver, horses)
+
+                    # 対象馬がいるのに1頭も拾えない場合は、別形式の出馬表URLも試す。
+                    # v10はここで0件を「発売前」とみなして終了したため、URL/DOM不一致を見逃していた。
+                    if horses and not odds:
+                        if "単勝" in body_text or "オッズ" in body_text:
+                            last_reason = "対象レースは開けたが単勝オッズを抽出できず"
+                            continue
+
                     results[key] = {
                         "date": yyyymmdd,
                         "place": place,
@@ -2355,7 +2368,7 @@ def fetch_jra_win_odds_batch(race_requests):
                         "horses": odds,
                         "url": driver.current_url,
                     }
-                    # 発売前は odds が0件でもページ特定成功として保存する。
+                    # 発売前など、JRAページ自体にオッズ表示が無い場合だけ0件を許容する。
                     success = True
                     break
                 except Exception as e:
