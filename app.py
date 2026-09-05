@@ -2192,22 +2192,85 @@ def _fetch_jra_meeting_info(yyyymmdd):
 
 
 def _make_jra_odds_urls(place, race_no, yyyymmdd, kai, day):
-    """JRA出馬表URL候補。
+    """JRA出馬表URLの入口候補を返す。
 
-    JRAのCNAMEキーは ``01 + 場コード + 年 + 回 + 日 + R + 年月日``。
-    v10では先頭の ``01`` が欠けていたため、別ページへ遷移してオッズを取得できなかった。
-    ``sw01ddd``（PC詳細出馬表）と ``sw01dde``（簡易詳細出馬表）の両方を試す。
+    CNAME本体は ``01 + 場コード + 年 + 回 + 日 + R + 年月日`` で組めるが、
+    JRAの実レースURL末尾には ``/BA`` や ``/1E`` のような2文字トークンが付く。
+    このトークンはレースごとに異なり推測できないため、v12では固定値を付けず、
+    まず入口URLを開いてJRA自身が出すリンクから実URLを発見する。
     """
     code = JRA_VENUE_CODES.get(str(place).strip())
     if not code:
         return []
     base_key = f"01{code}{yyyymmdd[:4]}{int(kai):02d}{int(day):02d}{int(race_no):02d}{yyyymmdd}"
     return [
-        f"https://app.jra.jp/JRADB/accessD.html?CNAME=sw01ddd{base_key}",
-        f"https://app.jra.jp/JRADB/accessD.html?CNAME=sw01ddd{base_key}%2F00",
-        f"https://app.jra.jp/JRADB/accessD.html?CNAME=sw01dde{base_key}",
-        f"https://app.jra.jp/JRADB/accessD.html?CNAME=sw01dde{base_key}%2F00",
+        (f"https://app.jra.jp/JRADB/accessD.html?CNAME=sw01ddd{base_key}", base_key),
+        (f"https://app.jra.jp/JRADB/accessD.html?CNAME=sw01dde{base_key}", base_key),
     ]
+
+
+def _jra_target_page_ok(driver, yyyymmdd, place, race_no):
+    from selenium.webdriver.common.by import By
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+    except Exception:
+        return False
+    date_ok = f"{int(yyyymmdd[4:6])}月{int(yyyymmdd[6:8])}日" in body_text
+    place_ok = str(place) in body_text
+    race_ok = (f"{int(race_no)}レース" in body_text) or (f"{int(race_no)}R" in body_text)
+    return bool(date_ok and place_ok and race_ok)
+
+
+def _discover_and_open_jra_race(driver, wait, entry_url, base_key, yyyymmdd, place, race_no, kai, day):
+    """入口/選択画面からJRA自身のリンクを辿って対象レースを開く。"""
+    from selenium.webdriver.common.by import By
+
+    driver.get(entry_url)
+    wait.until(lambda d: d.find_element(By.TAG_NAME, "body").text.strip() != "")
+    time.sleep(0.8)
+    if _jra_target_page_ok(driver, yyyymmdd, place, race_no):
+        return True
+
+    # 1) 入口ページ内に対象CNAMEの実リンク（末尾トークン付き）があれば直接開く。
+    for a in driver.find_elements(By.CSS_SELECTOR, "a[href]"):
+        href = a.get_attribute("href") or ""
+        if base_key in href:
+            driver.get(href)
+            wait.until(lambda d: d.find_element(By.TAG_NAME, "body").text.strip() != "")
+            time.sleep(0.8)
+            if _jra_target_page_ok(driver, yyyymmdd, place, race_no):
+                return True
+
+    # 2) 開催選択画面なら、まず対象開催（例: 4回中山2日）をクリック。
+    meet_label = f"{int(kai)}回{place}{int(day)}日"
+    links = driver.find_elements(By.CSS_SELECTOR, "a[href]")
+    meet_href = None
+    for a in links:
+        txt = (a.text or "").replace(" ", "")
+        if meet_label in txt:
+            meet_href = a.get_attribute("href")
+            if meet_href:
+                break
+    if meet_href:
+        driver.get(meet_href)
+        wait.until(lambda d: d.find_element(By.TAG_NAME, "body").text.strip() != "")
+        time.sleep(0.8)
+        if _jra_target_page_ok(driver, yyyymmdd, place, race_no):
+            return True
+
+        # 開催ページに並ぶ1R〜12Rのリンクから対象Rを選ぶ。
+        for a in driver.find_elements(By.CSS_SELECTOR, "a[href]"):
+            href = a.get_attribute("href") or ""
+            txt = (a.text or "").strip()
+            # hrefのCNAME本体一致を最優先。表示テキストは画像リンクで空の場合がある。
+            if base_key in href or txt in {f"{int(race_no)}レース", f"{int(race_no)}R", str(int(race_no))}:
+                driver.get(href)
+                wait.until(lambda d: d.find_element(By.TAG_NAME, "body").text.strip() != "")
+                time.sleep(0.8)
+                if _jra_target_page_ok(driver, yyyymmdd, place, race_no):
+                    return True
+
+    return False
 
 
 def _parse_odds_from_rendered_rows(driver, expected_horses):
@@ -2339,19 +2402,16 @@ def fetch_jra_win_odds_batch(race_requests):
 
             success = False
             last_reason = ""
-            for url in _make_jra_odds_urls(place, race_no, yyyymmdd, meet["kai"], meet["day"]):
+            for entry_url, base_key in _make_jra_odds_urls(place, race_no, yyyymmdd, meet["kai"], meet["day"]):
                 try:
-                    driver.get(url)
-                    wait.until(lambda d: d.find_element(By.TAG_NAME, "body").text.strip() != "")
-                    time.sleep(1.0)
-                    body_text = driver.find_element(By.TAG_NAME, "body").text
-                    # 誤ページを採用しない。
-                    date_ok = f"{int(yyyymmdd[4:6])}月{int(yyyymmdd[6:8])}日" in body_text
-                    place_ok = place in body_text
-                    race_ok = (f"{race_no}レース" in body_text) or (f"{race_no}R" in body_text)
-                    if not (date_ok and place_ok and race_ok):
-                        last_reason = "対象レース表示を確認できず"
+                    opened = _discover_and_open_jra_race(
+                        driver, wait, entry_url, base_key,
+                        yyyymmdd, place, race_no, meet["kai"], meet["day"]
+                    )
+                    if not opened:
+                        last_reason = "JRA選択画面から対象レースの実URLを発見できず"
                         continue
+                    body_text = driver.find_element(By.TAG_NAME, "body").text
                     odds = _parse_odds_from_rendered_rows(driver, horses)
 
                     # 対象馬がいるのに1頭も拾えない場合は、別形式の出馬表URLも試す。
