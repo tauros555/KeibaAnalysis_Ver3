@@ -1872,8 +1872,17 @@ if training_df is not None and all(c in training_df.columns for c in ["場所", 
     races["距離"] = pd.to_numeric(races["距離"], errors="coerce")
     races = races.dropna().drop_duplicates().sort_values(["場所", "R"])
 
-    # JRA中央競馬は同日に最大3場開催のため、TRACK CONDITIONは最大3場まで表示する。
-    active_places = races["場所"].dropna().unique().tolist()[:3]
+    # 調教判定表には未使用行が「0」で残る場合がある。
+    # これを開催場として数えると 0 + 2場 で[:3]が埋まり、本来の3場目が消えるため先に除外する。
+    place_text = races["場所"].astype(str).str.strip()
+    valid_place_mask = ~place_text.isin(["", "0", "nan", "None", "NaN", "未指定"])
+    valid_race_mask = pd.to_numeric(races["R"], errors="coerce").fillna(0).gt(0)
+    valid_distance_mask = pd.to_numeric(races["距離"], errors="coerce").fillna(0).gt(0)
+    valid_surface_mask = races["芝・ダ"].isin(["芝", "ダ"])
+    races = races[valid_place_mask & valid_race_mask & valid_distance_mask & valid_surface_mask].copy()
+
+    # JRA中央競馬は同日に最大3場開催。無効行を除外した後の実開催場を最大3場表示する。
+    active_places = races["場所"].dropna().astype(str).str.strip().drop_duplicates().tolist()[:3]
     races = races[races["場所"].isin(active_places)].copy()
     st.caption("開催場・距離・芝/ダート・ZIは調教判定表から自動取得します。")
 
