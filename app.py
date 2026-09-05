@@ -1994,10 +1994,40 @@ def _fetch_rendered_cushion_values(urls):
                 if m:
                     venue = m.group(1).strip()
 
+                turf_going = None
+                dirt_going = None
+
+                # 馬場状態も生HTMLではなく、JavaScript描画後のDOMを読む。
+                # JRA側の表示構造変更で生HTMLの正規表現が別箇所を拾うことがあるため。
+                for selector, target in [("#turf_info", "turf"), ("#dirt_info", "dirt")]:
+                    try:
+                        txt = driver.find_element(By.CSS_SELECTOR, selector).text
+                        gm = re.search(r"(良|稍重|重|不良)", txt)
+                        if gm:
+                            if target == "turf":
+                                turf_going = gm.group(1)
+                            else:
+                                dirt_going = gm.group(1)
+                    except Exception:
+                        pass
+
+                # DOM個別要素から取れない場合のみ、描画後bodyから馬場状態部分を補完。
+                if turf_going is None or dirt_going is None:
+                    sm = re.search(
+                        r"馬場状態.*?芝\s*(良|稍重|重|不良).*?ダート\s*(良|稍重|重|不良)",
+                        body_text,
+                        flags=re.S,
+                    )
+                    if sm:
+                        turf_going = turf_going or sm.group(1)
+                        dirt_going = dirt_going or sm.group(2)
+
                 if venue and re.fullmatch(r"\d+(?:\.\d+)?", value_text):
                     rendered[venue] = {
                         "cushion": float(value_text),
                         "cushion_time": time_text or None,
+                        "turf_going": turf_going,
+                        "dirt_going": dirt_going,
                     }
                 else:
                     errors.append(f"{url}: クッション実測値を判定できませんでした ({value_text!r})")
@@ -2052,6 +2082,11 @@ def fetch_jra_track_conditions():
         if venue in results:
             results[venue]["cushion"] = rendered_info.get("cushion")
             results[venue]["cushion_time"] = rendered_info.get("cushion_time")
+            # 芝/ダートの馬場状態も描画後DOMの値を最優先する。
+            if rendered_info.get("turf_going"):
+                results[venue]["turf_going"] = rendered_info.get("turf_going")
+            if rendered_info.get("dirt_going"):
+                results[venue]["dirt_going"] = rendered_info.get("dirt_going")
 
     return results, errors
 
