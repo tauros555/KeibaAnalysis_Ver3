@@ -1200,14 +1200,14 @@ def add_zi_partner_columns(df):
     out["ZI順位"] = zi.rank(method="min", ascending=False).astype("Int64")
     valid = zi.dropna().sort_values(ascending=False)
     gap = float(valid.iloc[0] - valid.iloc[1]) if len(valid) >= 2 else None
-    out["ZI差"] = "-"
+    out["ZI差"] = pd.Series(["-"] * len(out), index=out.index, dtype="object")
     out["ZI相手判定"] = "-"
     if len(valid) > 0:
         top = valid.iloc[0]
         top_mask = zi.eq(top)
         if gap is not None:
             gap_disp = int(gap) if float(gap).is_integer() else round(gap, 1)
-            out.loc[top_mask, "ZI差"] = gap_disp
+            out.loc[top_mask, "ZI差"] = str(gap_disp)
         mark = "○"
         if gap is not None and gap >= 10:
             mark = "◎◎"
