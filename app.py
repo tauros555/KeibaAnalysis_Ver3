@@ -1,6 +1,6 @@
 # =====================================================
-# app.py Ver6.8
-# 芝・ダート別最終評価 + 調教師/騎手表示 + 注目レース一覧 対応版
+# app.py Ver7.1
+# Runaway's UI統合 + 芝・ダート別最終評価 + 調教師/騎手表示 + 注目レース一覧 対応版
 # =====================================================
 
 import streamlit as st
@@ -26,6 +26,7 @@ MODULES_DIR = BASE_DIR / "modules"
 # =====================================================
 
 TRAINING_CSV_PATH = DATA_DIR / "調教判定表.csv"
+TITLE_IMAGE_PATH = BASE_DIR / "タイトル.png"
 
 
 # =====================================================
@@ -1541,21 +1542,192 @@ def create_top_race_summary_by_full_analysis(
 # =====================================================
 
 st.set_page_config(
-    page_title="Runaway's | Race Analysis System",
+    page_title="Runaway's | Race Analysis System Ver7.1",
+    page_icon="🏇",
     layout="wide",
 )
 
-st.markdown("# 🏇 Runaway's")
-st.caption("Race Analysis System — Ver7.0")
-st.markdown("---")
+# Ver7.1: タイトル画像の世界観に合わせたダークネイビー × ゴールドUI
 st.markdown("""
 <style>
-.block-container {padding-top: 1.5rem; max-width: 1500px;}
-div[data-testid="stMetric"] {border:1px solid rgba(128,128,128,.25); border-radius:12px; padding:10px;}
-[data-testid="stDataFrame"] {border-radius:12px; overflow:hidden;}
-h3 {margin-top: .7rem;}
+:root {
+    --rw-bg: #061729;
+    --rw-bg-2: #0a2238;
+    --rw-panel: rgba(9, 34, 56, 0.94);
+    --rw-panel-2: rgba(12, 43, 69, 0.96);
+    --rw-border: #456b8a;
+    --rw-border-soft: rgba(94, 139, 173, .55);
+    --rw-gold: #f1c76a;
+    --rw-gold-2: #d9a83f;
+    --rw-text: #f7f9fc;
+    --rw-muted: #afc3d5;
+    --rw-blue: #3ea6ff;
+    --rw-green: #2cd0a0;
+}
+
+html, body, [class*="css"] {
+    color: var(--rw-text);
+}
+
+[data-testid="stAppViewContainer"] {
+    background:
+        radial-gradient(circle at 78% 0%, rgba(22, 67, 103, .34), transparent 34%),
+        linear-gradient(180deg, #041321 0%, var(--rw-bg) 38%, #071c30 100%);
+}
+
+[data-testid="stHeader"] {
+    background: rgba(4, 19, 33, .86);
+}
+
+.block-container {
+    padding-top: .65rem;
+    padding-bottom: 2.5rem;
+    max-width: 1500px;
+}
+
+/* タイトル画像 */
+[data-testid="stImage"] img {
+    width: 100%;
+    max-height: 370px;
+    object-fit: cover;
+    object-position: center 55%;
+    border-radius: 10px;
+    border: 1px solid rgba(241, 199, 106, .50);
+    box-shadow: 0 14px 34px rgba(0, 0, 0, .34);
+}
+.rw-version {
+    margin: .35rem 0 1.15rem 0;
+    color: var(--rw-gold);
+    text-align: center;
+    font-weight: 700;
+    letter-spacing: .06em;
+}
+.rw-tagline {
+    color: var(--rw-muted);
+    text-align: center;
+    margin-top: -.75rem;
+    margin-bottom: 1.1rem;
+    font-size: .92rem;
+}
+
+/* 見出し */
+h1, h2, h3, h4 {
+    color: var(--rw-text) !important;
+}
+h2, h3 {
+    letter-spacing: .02em;
+}
+[data-testid="stCaptionContainer"], .stCaption {
+    color: var(--rw-muted) !important;
+}
+
+/* カード・パネル */
+[data-testid="stVerticalBlockBorderWrapper"] {
+    background: linear-gradient(180deg, rgba(12, 43, 69, .95), rgba(6, 28, 48, .96));
+    border-color: var(--rw-border-soft) !important;
+    border-radius: 12px !important;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.025);
+}
+
+/* 入力欄 */
+[data-baseweb="input"] > div,
+[data-baseweb="select"] > div,
+[data-baseweb="textarea"] > div,
+.stTextInput input,
+.stNumberInput input,
+.stTextArea textarea {
+    background-color: #0d2a43 !important;
+    color: var(--rw-text) !important;
+    border-color: var(--rw-border) !important;
+}
+[data-baseweb="select"] span,
+[data-baseweb="select"] input,
+.stTextInput label, .stSelectbox label, .stTextArea label, .stRadio label, .stCheckbox label {
+    color: var(--rw-text) !important;
+}
+
+/* ボタン */
+.stButton > button {
+    background: linear-gradient(180deg, #f6d77e, var(--rw-gold));
+    color: #17202a !important;
+    border: 1px solid #ffd980;
+    border-radius: 8px;
+    font-weight: 800;
+}
+.stButton > button:hover {
+    background: #ffe19a;
+    border-color: #fff0bd;
+    color: #0e1720 !important;
+}
+
+/* チェックボックス */
+[data-testid="stCheckbox"] {
+    color: var(--rw-text) !important;
+}
+
+/* 表 */
+[data-testid="stDataFrame"] {
+    border: 1px solid var(--rw-border-soft);
+    border-radius: 10px;
+    overflow: hidden;
+    background: rgba(5, 25, 43, .90);
+}
+
+/* Alert */
+[data-testid="stAlert"] {
+    background: rgba(11, 40, 64, .95);
+    color: var(--rw-text);
+    border: 1px solid rgba(89, 132, 164, .48);
+}
+
+/* expander */
+[data-testid="stExpander"] {
+    border-color: var(--rw-border-soft) !important;
+    background: rgba(8, 31, 51, .86);
+}
+
+/* 下部データ読込パネル */
+.rw-data-panel {
+    margin-top: 1.45rem;
+    padding: .95rem 1.15rem .45rem 1.15rem;
+    border: 1px solid var(--rw-border-soft);
+    border-radius: 12px;
+    background: linear-gradient(180deg, rgba(11, 39, 63, .96), rgba(7, 29, 49, .96));
+}
+.rw-data-title {
+    color: var(--rw-text);
+    font-size: 1.15rem;
+    font-weight: 800;
+}
+.rw-data-title span {
+    color: var(--rw-gold);
+    margin-right: .45rem;
+}
+.rw-footer {
+    margin-top: 1.75rem;
+    padding-top: .95rem;
+    border-top: 1px solid var(--rw-gold-2);
+    color: var(--rw-muted);
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    font-size: .88rem;
+}
+.rw-footer strong { color: var(--rw-text); }
+.rw-footer .gold { color: var(--rw-gold); font-style: italic; }
 </style>
 """, unsafe_allow_html=True)
+
+if TITLE_IMAGE_PATH.exists():
+    st.image(str(TITLE_IMAGE_PATH), use_container_width=True)
+else:
+    st.markdown("# 🏇 Runaway's")
+
+st.markdown('<div class="rw-version">Race Analysis System — Ver7.1</div>', unsafe_allow_html=True)
+st.markdown('<div class="rw-tagline">データで見抜く、勝利への直線。</div>', unsafe_allow_html=True)
+
+# 注目レースはTRACK CONDITIONより上に表示するためのプレースホルダー
+top_race_container = st.container()
 
 
 # =====================================================
@@ -1571,15 +1743,15 @@ course_df = data["course"]
 # 調教判定表読み込み
 # =====================================================
 
-st.subheader("調教判定表")
-
 training_df = None
 
-use_training_data = st.checkbox(
-    "調教判定CSV / Excelを使用する",
-    value=True,
-    help="オフにすると、CSVがdataフォルダにあっても読み込まず、手入力だけで分析できます。",
-)
+# Ver7.1: 判定表使用チェックは画面最下部に配置。
+# 値はsession_stateから先に参照し、チェック変更時のrerunで全体へ反映する。
+if "use_training_data" not in st.session_state:
+    st.session_state["use_training_data"] = True
+use_training_data = bool(st.session_state.get("use_training_data", True))
+
+training_load_status = []
 
 if not use_training_data:
     if "training_df" in st.session_state:
@@ -1598,14 +1770,10 @@ else:
     if training_df is not None:
         st.session_state["training_df"] = training_df
 
-        st.success(
-            f"調教判定表CSVを読み込みました：{TRAINING_CSV_PATH}"
-        )
+        training_load_status.append(("success", f"調教判定表CSVを読み込みました：{TRAINING_CSV_PATH}"))
 
     else:
-        st.info(
-            f"事前配置CSVが見つかりません：{TRAINING_CSV_PATH}"
-        )
+        training_load_status.append(("info", f"事前配置CSVが見つかりません：{TRAINING_CSV_PATH}"))
 
         training_file = st.file_uploader(
             "調教判定表Excelをアップロードする場合はこちら",
@@ -1649,9 +1817,7 @@ else:
 
                 st.session_state["training_df"] = training_df
 
-                st.success(
-                    f"調教判定表を読み込みました。読み込みシート：{actual_sheet_name}"
-                )
+                training_load_status.append(("success", f"調教判定表を読み込みました。読み込みシート：{actual_sheet_name}"))
 
             except Exception as e:
                 st.error("調教判定表の読み込み中にエラーが発生しました。")
@@ -1687,11 +1853,11 @@ if training_df is not None:
         with st.expander("読み込んだ列名を確認"):
             st.write(training_df.columns.tolist())
     else:
-        st.success("調教判定に必要な列を確認できました。")
+        training_load_status.append(("success", "調教判定に必要な列を確認できました。"))
 
 
 # =====================================================
-# 第2ブロック / Ver7.0 Runaway's 当日ダッシュボード
+# 第2ブロック / Ver7.1 Runaway's 当日ダッシュボード
 # =====================================================
 
 st.subheader("TRACK CONDITION")
@@ -1706,41 +1872,75 @@ if training_df is not None and all(c in training_df.columns for c in ["場所", 
     races["距離"] = pd.to_numeric(races["距離"], errors="coerce")
     races = races.dropna().drop_duplicates().sort_values(["場所", "R"])
 
-    active_places = races["場所"].dropna().unique().tolist()
+    # JRA中央競馬は同日に最大3場開催のため、TRACK CONDITIONは最大3場まで表示する。
+    active_places = races["場所"].dropna().unique().tolist()[:3]
+    races = races[races["場所"].isin(active_places)].copy()
     st.caption("開催場・距離・芝/ダート・ZIは調教判定表から自動取得します。")
 
     cushion_map = dict(st.session_state.get("cushion_by_place", {}))
     going_map = dict(st.session_state.get("going_by_place", {}))
+
+    # Ver7.0と同じ配置：競馬場カードの下に共通のRACE NAVIGATIONを置く。
     venue_cols = st.columns(max(1, len(active_places)))
     for i, venue in enumerate(active_places):
         vraces = races[races["場所"] == venue]
         with venue_cols[i]:
-            st.markdown(f"### {venue}")
-            if (vraces["芝・ダ"] == "芝").any():
-                old = cushion_map.get(venue, "")
-                cv = st.text_input("芝 クッション値", value=str(old), key=f"cushion_{venue}", placeholder="例 9.3")
-                try:
-                    cushion_map[venue] = float(cv) if str(cv).strip() else None
-                except ValueError:
+            with st.container(border=True):
+                st.markdown(f"### 🏇 {venue}")
+                if (vraces["芝・ダ"] == "芝").any():
+                    old = cushion_map.get(venue, "")
+                    cv = st.text_input(
+                        "芝 クッション値",
+                        value=str(old) if old is not None else "",
+                        key=f"cushion_{venue}",
+                        placeholder="例 9.3",
+                    )
+                    try:
+                        cushion_map[venue] = float(cv) if str(cv).strip() else None
+                    except ValueError:
+                        cushion_map[venue] = None
+                        st.warning("クッション値は数値で入力してください。")
+                else:
                     cushion_map[venue] = None
-                    st.warning("数値で入力")
-            if (vraces["芝・ダ"] == "ダ").any():
-                opts = ["未指定", "良", "稍重", "重", "不良"]
-                oldg = going_map.get(venue) or "未指定"
-                gv = st.selectbox("ダート 馬場状態", opts, index=opts.index(oldg) if oldg in opts else 0, key=f"going_{venue}")
-                going_map[venue] = None if gv == "未指定" else gv
+
+                if (vraces["芝・ダ"] == "ダ").any():
+                    opts = ["未指定", "良", "稍重", "重", "不良"]
+                    oldg = going_map.get(venue) or "未指定"
+                    gv = st.selectbox(
+                        "ダート 馬場状態",
+                        opts,
+                        index=opts.index(oldg) if oldg in opts else 0,
+                        key=f"going_{venue}",
+                    )
+                    going_map[venue] = None if gv == "未指定" else gv
+                else:
+                    going_map[venue] = None
+
     st.session_state["cushion_by_place"] = cushion_map
     st.session_state["going_by_place"] = going_map
 
     st.markdown("#### RACE NAVIGATION")
     race_options = []
     race_map = {}
-    for _, rr in races.iterrows():
-        label = f'{rr["場所"]} {int(rr["R"])}R  {rr["芝・ダ"]}{int(rr["距離"])}m'
-        race_options.append(label); race_map[label] = rr
-    selected_race = st.selectbox("分析するレース", race_options, label_visibility="collapsed")
+    for _, rr0 in races.iterrows():
+        label = f'{rr0["場所"]} {int(rr0["R"])}R  {rr0["芝・ダ"]}{int(rr0["距離"])}m'
+        race_options.append(label)
+        race_map[label] = rr0
+
+    if not race_options:
+        st.error("分析できるレースが調教判定表に見つかりません。")
+        st.stop()
+
+    selected_race = st.selectbox(
+        "分析するレース",
+        race_options,
+        key="race_navigation",
+        label_visibility="collapsed",
+    )
     rr = race_map[selected_race]
-    place = str(rr["場所"]); race_no = int(rr["R"]); distance = int(rr["距離"])
+    place = str(rr["場所"])
+    race_no = int(rr["R"])
+    distance = int(rr["距離"])
     surface = "芝" if normalize_surface(rr["芝・ダ"]) == "芝" else "ダート"
     cushion = cushion_map.get(place) if surface == "芝" else None
     going = going_map.get(place) if surface == "ダート" else None
@@ -1784,17 +1984,12 @@ current_condition_signature = (
 # トップページ：相手候補以上レース一覧
 # =====================================================
 
-if training_df is not None:
-    st.subheader("本日の注目レース")
+with top_race_container:
+    if training_df is not None:
+        st.subheader("🏆 注目レース")
 
-    st.caption("最終評価Sの馬がいるレースだけを表示します。ZIは能力・相手候補の独立軸です。")
+        st.caption("S評価の馬がいるレースのみを表示しています。ZIは能力・相手候補の独立軸です。")
 
-    show_top_summary = st.checkbox(
-        "注目レース一覧を表示する",
-        value=True,
-    )
-
-    if show_top_summary:
         target_place_list = active_places if "active_places" in locals() else []
 
         with st.spinner("注目レースを分析中です..."):
@@ -1824,7 +2019,6 @@ if training_df is not None:
             st.info(
                 "最終評価Sの注目レースは見つかりませんでした。"
             )
-
 # =====================================================
 # 出走馬データ作成
 # =====================================================
@@ -1936,9 +2130,10 @@ if run:
 
     results = []
 
-    progress = st.progress(0)
+    progress_text = st.empty()
 
     for i, horse in enumerate(horses):
+        progress_text.caption(f"分析中… {i + 1}/{len(horses)}頭")
         surface_code = "芝" if surface == "芝" else "ダ"
 
         if place == "すべて":
@@ -1972,9 +2167,7 @@ if run:
                 f'{horse["horse_name"]} の分析結果が作成できませんでした。'
             )
 
-        progress.progress((i + 1) / len(horses))
-
-    progress.empty()
+    progress_text.empty()
 
     st.session_state["results"] = results
     st.session_state["analysis_condition_signature"] = current_condition_signature
@@ -2567,3 +2760,34 @@ if "results" in st.session_state:
         use_container_width=True,
         hide_index=True,
     )
+
+# =====================================================
+# Ver7.1 最下部：データ読み込み / 判定表使用設定
+# =====================================================
+
+with st.container(border=True):
+    data_title_col, data_check_col = st.columns([2.2, 1.8], vertical_alignment="center")
+    with data_title_col:
+        st.markdown("### 🗄️ データ読み込み")
+    with data_check_col:
+        st.checkbox(
+            "調教判定CSV / Excelを使用する",
+            key="use_training_data",
+            help="オフにすると、dataフォルダの調教判定CSVを使用せず、手入力モードで分析します。",
+        )
+
+    if training_load_status:
+        with st.expander("調教判定データの読み込み状態", expanded=False):
+            for status_kind, status_message in training_load_status:
+                if status_kind == "success":
+                    st.success(status_message)
+                elif status_kind == "warning":
+                    st.warning(status_message)
+                else:
+                    st.info(status_message)
+
+st.markdown(
+    '<div class="rw-footer"><div><strong>Runaway’s</strong> — Race Analysis System &nbsp; Ver7.1</div>'
+    '<div class="gold">Analyze &nbsp; Find the Odds &nbsp; Run to the Future</div></div>',
+    unsafe_allow_html=True,
+)
