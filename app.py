@@ -1,6 +1,6 @@
 # =====================================================
 # app.py Ver7.2
-# Runaway's UI統合 + JRA馬場情報 + 単勝オッズ自動取得 + 妙味自動判定 対応版 v13
+# Runaway's UI統合 + JRA馬場情報 + 単勝オッズ自動取得 + 妙味自動判定 対応版 v15
 # =====================================================
 
 import streamlit as st
@@ -2785,47 +2785,14 @@ if training_df is not None:
         top_summary_df = pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame()
 
     if len(top_summary_df) > 0:
-        # v13: 全注目レースを一括取得しない。RACE NAVIGATIONで選択中の1レースだけ取得する。
-        selected_odds_requests = build_odds_requests(training_df, [(place, race_no)]) if race_no is not None else []
-        odds_cache = dict(st.session_state.get("jra_win_odds_cache", {}))
-        selected_key = None
-        if selected_odds_requests:
-            r0 = selected_odds_requests[0]
-            selected_key = f'{r0["date"]}_{r0["place"]}_{r0["race_no"]}'
-
-        # 選択レースだけ初回取得。取得済みはsession_stateを使い、再実行ではJRAへ行かない。
-        if selected_odds_requests and selected_key not in odds_cache:
-            with st.spinner(f"{place} {int(race_no)}R のJRA単勝オッズを取得中です..."):
-                new_odds, odds_errors = fetch_jra_win_odds_batch(selected_odds_requests)
-            odds_cache.update(new_odds)
-            st.session_state["jra_win_odds_cache"] = odds_cache
-            st.session_state["jra_win_odds_errors"] = odds_errors
-
-        odds_col, odds_note_col = st.columns([1, 3], vertical_alignment="center")
-        with odds_col:
-            if st.button("🔄 選択レースのオッズ再取得", key="refresh_top_odds", use_container_width=True):
-                if selected_odds_requests:
-                    with st.spinner(f"{place} {int(race_no)}R のJRA単勝オッズを更新中です..."):
-                        refreshed, odds_errors = fetch_jra_win_odds_batch(selected_odds_requests)
-                    odds_cache.update(refreshed)
-                    st.session_state["jra_win_odds_cache"] = odds_cache
-                    st.session_state["jra_win_odds_errors"] = odds_errors
-                    st.rerun()
-        with odds_note_col:
-            st.caption("高速化のため、RACE NAVIGATIONで選択中の1レースだけ取得します。取得済みオッズは保持し、再取得ボタンを押した時だけ更新します。")
-
-        top_summary_df = merge_odds_into_result_df(top_summary_df, training_df)
+        # v15: 注目レース一覧ではJRAオッズへアクセスしない。
+        # 一覧はS評価・理論妙味候補の確認に限定し、オッズ取得は選択レースの分析結果欄だけで行う。
+        st.caption("注目レース一覧ではオッズ取得を行いません。単勝オッズ・人気・実オッズ妙味判定は、選択レースの分析結果でのみ取得・表示します。")
         st.dataframe(
             top_summary_df,
             use_container_width=True,
             hide_index=True,
         )
-        odds_errors = st.session_state.get("jra_win_odds_errors", [])
-        if odds_errors:
-            with st.expander("JRAオッズ取得メモ", expanded=False):
-                st.caption("発売前は単勝オッズが「-」になります。取得失敗時も分析自体は継続します。")
-                for err in odds_errors[-20:]:
-                    st.code(err)
     else:
         st.info(
             "最終評価Sの注目レースは見つかりませんでした。"
@@ -3282,19 +3249,38 @@ if "results" in st.session_state:
     result_df["最終スコア"] = final_scores
     result_df["表面確認"] = [normalize_surface_label(surface) for _ in final_scores]
 
-    # v13: 選択レースの単勝オッズがまだなければ初回だけ取得（通常は注目レース欄で取得済み）。
+    # v15: JRAオッズ取得は「分析結果」内の選択レースだけ。
+    # 注目レース一覧ではアクセスしない。初回のみ自動取得し、以後は明示的な再取得ボタンで更新する。
     selected_date = _race_date_from_training(training_df, place, race_no) if training_df is not None and race_no is not None else None
     selected_key = f"{selected_date}_{place}_{race_no}" if selected_date and race_no is not None else None
     odds_cache = dict(st.session_state.get("jra_win_odds_cache", {}))
-    if selected_key and selected_key not in odds_cache:
-        reqs = build_odds_requests(training_df, [(place, race_no)])
-        if reqs:
-            with st.spinner("選択レースのJRA単勝オッズを取得中です..."):
-                fetched, odds_errors = fetch_jra_win_odds_batch(reqs)
-            odds_cache.update(fetched)
-            st.session_state["jra_win_odds_cache"] = odds_cache
-            if odds_errors:
-                st.session_state["jra_win_odds_errors"] = odds_errors
+    reqs = build_odds_requests(training_df, [(place, race_no)]) if selected_key else []
+
+    odds_button_col, odds_note_col = st.columns([1, 3], vertical_alignment="center")
+    with odds_button_col:
+        refresh_selected_odds = st.button(
+            "🔄 選択レースのオッズ再取得",
+            key="refresh_result_odds",
+            use_container_width=True,
+        )
+    with odds_note_col:
+        st.caption("JRAオッズはこの選択レースだけ取得します。注目レース一覧からは取得しません。")
+
+    should_fetch_odds = bool(reqs) and (selected_key not in odds_cache or refresh_selected_odds)
+    if should_fetch_odds:
+        action = "更新" if refresh_selected_odds else "取得"
+        with st.spinner(f"{place} {int(race_no)}R のJRA単勝オッズを{action}中です..."):
+            fetched, odds_errors = fetch_jra_win_odds_batch(reqs)
+        odds_cache.update(fetched)
+        st.session_state["jra_win_odds_cache"] = odds_cache
+        st.session_state["jra_win_odds_errors"] = odds_errors
+
+    odds_errors = st.session_state.get("jra_win_odds_errors", [])
+    if odds_errors:
+        with st.expander("JRAオッズ取得メモ", expanded=False):
+            st.caption("発売前は単勝オッズが「-」になります。取得失敗時も分析自体は継続します。")
+            for err in odds_errors[-10:]:
+                st.code(err)
 
     current_odds = []
     current_pop = []
