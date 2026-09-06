@@ -1,6 +1,6 @@
 # =====================================================
 # app.py Ver7.2
-# Runaway's UI統合 + JRA馬場情報 + 単勝オッズ自動取得 + 妙味自動判定 対応版 v15
+# Runaway's UI統合 + JRA馬場情報 + 単勝オッズ自動取得 + 妙味自動判定 対応版 v16
 # =====================================================
 
 import streamlit as st
@@ -2221,57 +2221,174 @@ def _jra_target_page_ok(driver, yyyymmdd, place, race_no):
     return bool(date_ok and place_ok and race_ok)
 
 
+def _extract_real_jra_race_urls(driver, base_key):
+    """現在ページのHTML/リンク/onclickから、JRAが埋め込んだ実レースURLを拾う。"""
+    from selenium.webdriver.common.by import By
+    from urllib.parse import unquote, urljoin
+
+    candidates = []
+
+    def add_candidate(raw):
+        if not raw:
+            return
+        text = unquote(str(raw)).replace("&amp;", "&")
+        if base_key not in text:
+            return
+        # CNAME=.../XX の実URLだけを採用。末尾トークンは16進2桁。
+        m = re.search(
+            r'(?:https?://app\\.jra\\.jp)?/?JRADB/accessD\\.html\\?CNAME=(sw01(?:ddd|dde)'
+            + re.escape(base_key)
+            + r'/[0-9A-Fa-f]{2})',
+            text,
+            flags=re.I,
+        )
+        if m:
+            url = "https://app.jra.jp/JRADB/accessD.html?CNAME=" + m.group(1)
+            if url not in candidates:
+                candidates.append(url)
+            return
+        # href が相対形/エンコード形の場合も CNAME 部分だけ拾う。
+        m = re.search(
+            r'CNAME=(sw01(?:ddd|dde)'
+            + re.escape(base_key)
+            + r'/[0-9A-Fa-f]{2})',
+            text,
+            flags=re.I,
+        )
+        if m:
+            url = "https://app.jra.jp/JRADB/accessD.html?CNAME=" + m.group(1)
+            if url not in candidates:
+                candidates.append(url)
+
+    # page_source には、画面上の a[href] では見えないJS用CNAMEが入ることがある。
+    try:
+        add_candidate(driver.page_source)
+        decoded = unquote(driver.page_source)
+        # page_source全体から複数候補を抽出。
+        pattern = re.compile(
+            r'sw01(?:ddd|dde)' + re.escape(base_key) + r'(?:/|%2F)([0-9A-Fa-f]{2})',
+            flags=re.I,
+        )
+        for m in pattern.finditer(driver.page_source):
+            prefix_start = max(0, m.start()-20)
+            frag = unquote(driver.page_source[prefix_start:m.end()+5])
+            add_candidate('CNAME=' + m.group(0).replace('%2F','/').replace('%2f','/'))
+        for m in pattern.finditer(decoded):
+            add_candidate('CNAME=' + m.group(0))
+    except Exception:
+        pass
+
+    # href / onclick / data-* に遷移情報が入っているケースも拾う。
+    try:
+        for el in driver.find_elements(By.CSS_SELECTOR, "a,button,input,[onclick]"):
+            for attr in ("href", "onclick", "data-href", "data-url", "value"):
+                try:
+                    add_candidate(el.get_attribute(attr))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return candidates
+
+
 def _discover_and_open_jra_race(driver, wait, entry_url, base_key, yyyymmdd, place, race_no, kai, day):
-    """入口/選択画面からJRA自身のリンクを辿って対象レースを開く。"""
+    """JRA自身がページ内に埋め込む実URLを見つけて対象レースを開く。"""
     from selenium.webdriver.common.by import By
 
-    driver.get(entry_url)
-    wait.until(lambda d: d.find_element(By.TAG_NAME, "body").text.strip() != "")
-    time.sleep(0.8)
+    def load(url):
+        driver.get(url)
+        wait.until(lambda d: d.find_element(By.TAG_NAME, "body").text.strip() != "")
+        time.sleep(0.5)
+
+    def try_embedded_urls():
+        for url in _extract_real_jra_race_urls(driver, base_key):
+            try:
+                load(url)
+                if _jra_target_page_ok(driver, yyyymmdd, place, race_no):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    load(entry_url)
     if _jra_target_page_ok(driver, yyyymmdd, place, race_no):
         return True
 
-    # 1) 入口ページ内に対象CNAMEの実リンク（末尾トークン付き）があれば直接開く。
-    for a in driver.find_elements(By.CSS_SELECTOR, "a[href]"):
-        href = a.get_attribute("href") or ""
-        if base_key in href:
-            driver.get(href)
-            wait.until(lambda d: d.find_element(By.TAG_NAME, "body").text.strip() != "")
-            time.sleep(0.8)
+    # v16: a[href] だけでなく page_source / onclick / data-* を先に探索。
+    if try_embedded_urls():
+        return True
+
+    # 開催選択画面の対象開催をクリック。hrefだけでなくonclickも見る。
+    meet_label = f"{int(kai)}回{place}{int(day)}日"
+    meet_targets = []
+    try:
+        for el in driver.find_elements(By.CSS_SELECTOR, "a,button,[onclick]"):
+            txt = (el.text or "").replace(" ", "")
+            if meet_label not in txt:
+                continue
+            for attr in ("href", "data-href", "data-url"):
+                v = el.get_attribute(attr)
+                if v and v.startswith("http"):
+                    meet_targets.append(v)
+            # onclick遷移ならクリックを試す。
+            if not meet_targets:
+                try:
+                    el.click()
+                    time.sleep(0.6)
+                    if _jra_target_page_ok(driver, yyyymmdd, place, race_no):
+                        return True
+                    if try_embedded_urls():
+                        return True
+                except Exception:
+                    pass
+                break
+    except Exception:
+        pass
+
+    for url in meet_targets:
+        try:
+            load(url)
             if _jra_target_page_ok(driver, yyyymmdd, place, race_no):
                 return True
+            if try_embedded_urls():
+                return True
+        except Exception:
+            continue
 
-    # 2) 開催選択画面なら、まず対象開催（例: 4回中山2日）をクリック。
-    meet_label = f"{int(kai)}回{place}{int(day)}日"
-    links = driver.find_elements(By.CSS_SELECTOR, "a[href]")
-    meet_href = None
-    for a in links:
-        txt = (a.text or "").replace(" ", "")
-        if meet_label in txt:
-            meet_href = a.get_attribute("href")
-            if meet_href:
-                break
-    if meet_href:
-        driver.get(meet_href)
-        wait.until(lambda d: d.find_element(By.TAG_NAME, "body").text.strip() != "")
-        time.sleep(0.8)
-        if _jra_target_page_ok(driver, yyyymmdd, place, race_no):
-            return True
-
-        # 開催ページに並ぶ1R〜12Rのリンクから対象Rを選ぶ。
-        for a in driver.find_elements(By.CSS_SELECTOR, "a[href]"):
-            href = a.get_attribute("href") or ""
-            txt = (a.text or "").strip()
-            # hrefのCNAME本体一致を最優先。表示テキストは画像リンクで空の場合がある。
-            if base_key in href or txt in {f"{int(race_no)}レース", f"{int(race_no)}R", str(int(race_no))}:
-                driver.get(href)
-                wait.until(lambda d: d.find_element(By.TAG_NAME, "body").text.strip() != "")
-                time.sleep(0.8)
+    # 最後に対象R表示要素をクリック。画像リンクでtextが空でも title/alt/aria-label を見る。
+    try:
+        for el in driver.find_elements(By.CSS_SELECTOR, "a,button,[onclick]"):
+            labels = [
+                el.text or "",
+                el.get_attribute("title") or "",
+                el.get_attribute("aria-label") or "",
+            ]
+            try:
+                img = el.find_element(By.CSS_SELECTOR, "img")
+                labels.append(img.get_attribute("alt") or "")
+            except Exception:
+                pass
+            joined = " ".join(labels).replace(" ", "")
+            if not any(x in joined for x in (f"{int(race_no)}R", f"{int(race_no)}レース")):
+                continue
+            try:
+                href = el.get_attribute("href") or ""
+                if href.startswith("http"):
+                    load(href)
+                else:
+                    el.click()
+                    time.sleep(0.6)
                 if _jra_target_page_ok(driver, yyyymmdd, place, race_no):
                     return True
+                if try_embedded_urls():
+                    return True
+            except Exception:
+                continue
+    except Exception:
+        pass
 
     return False
-
 
 def _parse_odds_from_rendered_rows(driver, expected_horses):
     """描画後の出馬表から、調教判定表の馬名をキーに単勝・人気を拾う。"""
