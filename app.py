@@ -1,6 +1,6 @@
 # =====================================================
 # app.py Ver7.2
-# Runaway's UI統合 + JRA馬場情報 + 単勝オッズ自動取得 + 妙味自動判定 対応版 v16
+# Runaway's UI統合 + JRA馬場情報 + 単勝オッズ自動取得 + 妙味自動判定 対応版 v17
 # =====================================================
 
 import streamlit as st
@@ -11,6 +11,7 @@ from pathlib import Path
 import html as html_lib
 import re
 import time
+import json
 from urllib.request import Request, urlopen
 
 import config
@@ -2469,99 +2470,142 @@ def _parse_odds_from_rendered_rows(driver, expected_horses):
     return found
 
 
-def fetch_jra_win_odds_batch(race_requests):
+def _make_netkeiba_race_id(place, yyyymmdd, kai, day, race_no):
+    """netkeibaの12桁race_idを作る: YYYY + 場コード + 回 + 日 + R。"""
+    code = JRA_VENUE_CODES.get(str(place).strip())
+    if not code or not yyyymmdd or len(yyyymmdd) != 8:
+        return None
+    return f"{yyyymmdd[:4]}{code}{int(kai):02d}{int(day):02d}{int(race_no):02d}"
+
+
+def _extract_netkeiba_win_odds(payload, horses):
+    """netkeiba odds APIのJSONから馬番→単勝/人気を抽出する。"""
+    data = payload.get("data", payload) if isinstance(payload, dict) else {}
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            data = {}
+    odds_root = data.get("odds", {}) if isinstance(data, dict) else {}
+    win = odds_root.get("1", {}) if isinstance(odds_root, dict) else {}
+    if not isinstance(win, dict):
+        return {}
+
+    horse_name_map = {
+        to_int_or_none(h.get("horse_no")): str(h.get("horse_name", ""))
+        for h in (horses or [])
+        if to_int_or_none(h.get("horse_no")) is not None
+    }
+    found = {}
+    for horse_key, values in win.items():
+        try:
+            horse_no = int(str(horse_key))
+        except Exception:
+            continue
+        if not isinstance(values, (list, tuple)) or not values:
+            continue
+        raw_odds = str(values[0]).strip()
+        if not re.fullmatch(r"\d+(?:\.\d+)?", raw_odds):
+            continue
+        odds = float(raw_odds)
+        popularity = None
+        # 現行APIは [単勝, 補助値, 人気]。仕様変更に備えて末尾から整数人気を探す。
+        if len(values) >= 3:
+            try:
+                popularity = int(str(values[2]).strip())
+            except Exception:
+                popularity = None
+        found[horse_no] = {
+            "horse_no": horse_no,
+            "horse_name": horse_name_map.get(horse_no, ""),
+            "odds": odds,
+            "popularity": popularity,
+        }
+    return found
+
+
+def fetch_jra_win_odds_batch(race_requests, force_update=False):
     """
-    複数レースの単勝オッズをChromium 1起動で取得。
-    race_requests: [{date, place, race_no, horses}, ...]
+    v17: JRAのトークン付き出馬表URL探索を廃止し、netkeibaの当日オッズJSON APIから取得する。
+    race_idは開催情報から決定的に生成できるため高速・安定。
+    馬場情報は従来どおりJRA公式から取得する。
     """
     results = {}
     errors = []
     if not race_requests:
         return results, errors
 
-    driver = None
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
+    meeting_cache = {}
+    for req in race_requests:
+        yyyymmdd = _normalize_yyyymmdd(req.get("date"))
+        place = str(req.get("place", "")).strip()
+        race_no = to_int_or_none(req.get("race_no"))
+        horses = req.get("horses", [])
+        key = f"{yyyymmdd}_{place}_{race_no}"
+        if not yyyymmdd or not place or race_no is None:
+            errors.append(f"{key}: レース識別情報不足")
+            continue
 
-        options = webdriver.ChromeOptions()
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--window-size=1440,1200")
-        options.add_argument("--lang=ja-JP")
-        options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36")
-        driver = webdriver.Chrome(options=options)
-        wait = WebDriverWait(driver, 12)
+        if yyyymmdd not in meeting_cache:
+            meeting_cache[yyyymmdd] = _fetch_jra_meeting_info(yyyymmdd)
+        meetings, meet_errors = meeting_cache[yyyymmdd]
+        if meet_errors:
+            errors.extend(meet_errors)
+        meet = meetings.get(place)
+        if not meet:
+            errors.append(f"{key}: {place}の回次・日次を取得できませんでした")
+            continue
 
-        meeting_cache = {}
-        for req in race_requests:
-            yyyymmdd = _normalize_yyyymmdd(req.get("date"))
-            place = str(req.get("place", "")).strip()
-            race_no = to_int_or_none(req.get("race_no"))
-            horses = req.get("horses", [])
-            key = f"{yyyymmdd}_{place}_{race_no}"
-            if not yyyymmdd or not place or race_no is None:
-                errors.append(f"{key}: レース識別情報不足")
-                continue
+        race_id = _make_netkeiba_race_id(place, yyyymmdd, meet["kai"], meet["day"], race_no)
+        if not race_id:
+            errors.append(f"{key}: race_idを生成できませんでした")
+            continue
 
-            if yyyymmdd not in meeting_cache:
-                meeting_cache[yyyymmdd] = _fetch_jra_meeting_info(yyyymmdd)
-            meetings, meet_errors = meeting_cache[yyyymmdd]
-            if meet_errors:
-                errors.extend(meet_errors)
-            meet = meetings.get(place)
-            if not meet:
-                errors.append(f"{key}: {place}の回次・日次を取得できませんでした")
-                continue
+        action = "update" if force_update else "init"
+        api_url = (
+            "https://race.netkeiba.com/api/api_get_jra_odds.html"
+            f"?race_id={race_id}&type=1&action={action}&sort=odds&compress=0&output=json"
+        )
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "ja,en-US;q=0.8",
+            "Referer": f"https://race.netkeiba.com/odds/index.html?type=b1&race_id={race_id}",
+        }
+        try:
+            req_obj = Request(api_url, headers=headers)
+            with urlopen(req_obj, timeout=10) as resp:
+                raw = resp.read()
+            text = raw.decode("utf-8", errors="replace").strip()
+            # JSONP形式で返るケースにも対応。
+            if not text.startswith("{"):
+                m = re.search(r"\((\{.*\})\)\s*;?\s*$", text, flags=re.S)
+                if m:
+                    text = m.group(1)
+            payload = json.loads(text)
+            odds = _extract_netkeiba_win_odds(payload, horses)
 
-            success = False
-            last_reason = ""
-            for entry_url, base_key in _make_jra_odds_urls(place, race_no, yyyymmdd, meet["kai"], meet["day"]):
-                try:
-                    opened = _discover_and_open_jra_race(
-                        driver, wait, entry_url, base_key,
-                        yyyymmdd, place, race_no, meet["kai"], meet["day"]
-                    )
-                    if not opened:
-                        last_reason = "JRA選択画面から対象レースの実URLを発見できず"
-                        continue
-                    body_text = driver.find_element(By.TAG_NAME, "body").text
-                    odds = _parse_odds_from_rendered_rows(driver, horses)
+            # 発売前なら0件は正常。API自体のエラー文がある場合だけ取得失敗として扱う。
+            if not odds and isinstance(payload, dict):
+                status = str(payload.get("status", "")).lower()
+                message = payload.get("message") or payload.get("error")
+                if message and status not in ("", "ok", "success", "1"):
+                    errors.append(f"{key}: netkeibaオッズAPI - {message}")
+                    continue
 
-                    # 対象馬がいるのに1頭も拾えない場合は、別形式の出馬表URLも試す。
-                    # v10はここで0件を「発売前」とみなして終了したため、URL/DOM不一致を見逃していた。
-                    if horses and not odds:
-                        if "単勝" in body_text or "オッズ" in body_text:
-                            last_reason = "対象レースは開けたが単勝オッズを抽出できず"
-                            continue
+            results[key] = {
+                "date": yyyymmdd,
+                "place": place,
+                "race_no": race_no,
+                "horses": odds,
+                "url": f"https://race.netkeiba.com/odds/index.html?type=b1&race_id={race_id}",
+                "source": "netkeiba",
+                "race_id": race_id,
+            }
+        except Exception as e:
+            errors.append(f"{key}: 単勝オッズ取得失敗 - {e}")
 
-                    results[key] = {
-                        "date": yyyymmdd,
-                        "place": place,
-                        "race_no": race_no,
-                        "horses": odds,
-                        "url": driver.current_url,
-                    }
-                    # 発売前など、JRAページ自体にオッズ表示が無い場合だけ0件を許容する。
-                    success = True
-                    break
-                except Exception as e:
-                    last_reason = str(e)
-            if not success:
-                errors.append(f"{key}: JRA出馬表取得失敗 - {last_reason}")
-    except Exception as e:
-        errors.append(f"単勝オッズ用Chromium/Seleniumを起動できませんでした - {e}")
-    finally:
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
     return results, errors
-
 
 def _race_date_from_training(training_df, place, race_no):
     if training_df is None or "年月日" not in training_df.columns:
@@ -3366,7 +3410,7 @@ if "results" in st.session_state:
     result_df["最終スコア"] = final_scores
     result_df["表面確認"] = [normalize_surface_label(surface) for _ in final_scores]
 
-    # v15: JRAオッズ取得は「分析結果」内の選択レースだけ。
+    # v17: オッズ取得は「分析結果」内の選択レースだけ。
     # 注目レース一覧ではアクセスしない。初回のみ自動取得し、以後は明示的な再取得ボタンで更新する。
     selected_date = _race_date_from_training(training_df, place, race_no) if training_df is not None and race_no is not None else None
     selected_key = f"{selected_date}_{place}_{race_no}" if selected_date and race_no is not None else None
@@ -3381,20 +3425,20 @@ if "results" in st.session_state:
             use_container_width=True,
         )
     with odds_note_col:
-        st.caption("JRAオッズはこの選択レースだけ取得します。注目レース一覧からは取得しません。")
+        st.caption("単勝オッズは選択レースだけ取得します。JRAのトークンURL探索は使わず、netkeiba掲載オッズAPIを利用します。")
 
     should_fetch_odds = bool(reqs) and (selected_key not in odds_cache or refresh_selected_odds)
     if should_fetch_odds:
         action = "更新" if refresh_selected_odds else "取得"
-        with st.spinner(f"{place} {int(race_no)}R のJRA単勝オッズを{action}中です..."):
-            fetched, odds_errors = fetch_jra_win_odds_batch(reqs)
+        with st.spinner(f"{place} {int(race_no)}R の単勝オッズを{action}中です..."):
+            fetched, odds_errors = fetch_jra_win_odds_batch(reqs, force_update=refresh_selected_odds)
         odds_cache.update(fetched)
         st.session_state["jra_win_odds_cache"] = odds_cache
         st.session_state["jra_win_odds_errors"] = odds_errors
 
     odds_errors = st.session_state.get("jra_win_odds_errors", [])
     if odds_errors:
-        with st.expander("JRAオッズ取得メモ", expanded=False):
+        with st.expander("オッズ取得メモ", expanded=False):
             st.caption("発売前は単勝オッズが「-」になります。取得失敗時も分析自体は継続します。")
             for err in odds_errors[-10:]:
                 st.code(err)
